@@ -967,10 +967,9 @@
                             </button>
                         </div>
 
-                        <div class="grid lg:grid-cols-2 gap-6">
-                            <!-- SDI Controls -->
-                            <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
-                                <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
+                        <!-- SDI Controls -->
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
+                            <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
 
                                 <div class="space-y-4">
                                     <div class="grid grid-cols-2 gap-4">
@@ -1010,18 +1009,18 @@
                                     <!-- DAI et DM côte à côte -->
                                     <div class="grid grid-cols-2 gap-4">
                                         <div>
-                                            <h4 class="font-bold mb-2 text-sm">🔍 DAI</h4>
+                                            <h4 class="font-bold mb-2">🔍 DAI</h4>
                                             ${STATE.sdi.detectors.map(d => `
-                                                <div class="flex items-center gap-1 mb-1">
-                                                    <button onclick="${d.state === 'service' ? `toggleDetector('DAI', ${d.id})` : ''}" class="w-5 h-5 ${d.triggered ? 'bg-red-500' : 'bg-green-500'} rounded ${d.state === 'hors-service' ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-80'}"></button>
-                                                    <span class="text-xs font-mono w-12 flex-shrink-0">DAI${String(d.id).padStart(2, '0')}</span>
-                                                    <select onchange="changeDetectorZone('DAI', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                <div class="flex items-center gap-2 mb-2">
+                                                    <button onclick="${d.state === 'service' ? `toggleDetector('DAI', ${d.id})` : ''}" class="w-12 h-12 ${d.triggered ? 'bg-red-500' : 'bg-green-500'} rounded-lg border-3 border-black ${d.state === 'hors-service' ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
+                                                    <span class="text-sm font-mono w-14 flex-shrink-0 font-bold">DAI${String(d.id).padStart(2, '0')}</span>
+                                                    <select onchange="changeDetectorZone('DAI', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                         <option value="ZC1" ${d.zone === 'ZC1' ? 'selected' : ''}>ZC1</option>
                                                         <option value="ZC2" ${d.zone === 'ZC2' ? 'selected' : ''}>ZC2</option>
                                                         <option value="ZC3" ${d.zone === 'ZC3' ? 'selected' : ''}>ZC3</option>
                                                     </select>
-                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DAI', ${d.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                                                    <select onchange="changeDetectorState('DAI', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DAI', ${d.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <select onchange="changeDetectorState('DAI', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                         <option value="service" ${d.state === 'service' ? 'selected' : ''}>OK</option>
                                                         <option value="hors-service" ${d.state === 'hors-service' ? 'selected' : ''}>HS</option>
                                                     </select>
@@ -1030,22 +1029,22 @@
                                         </div>
 
                                         <div>
-                                            <h4 class="font-bold mb-2 text-sm">🚨 DM</h4>
+                                            <h4 class="font-bold mb-2">🚨 DM</h4>
                                             ${STATE.sdi.manualAlarms.map(d => `
-                                                <div class="flex items-center gap-1 mb-1">
-                                                    <button onclick="${d.state === 'service' ? `toggleDetector('DM', ${d.id})` : ''}" class="w-5 h-5 ${d.triggered ? 'bg-red-500' : 'bg-green-500'} rounded ${d.state === 'hors-service' ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-80'}"></button>
-                                                    <span class="text-xs font-mono w-10 flex-shrink-0">DM${String(d.id).padStart(2, '0')}</span>
-                                                    <select onchange="changeDetectorZone('DM', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                <div class="flex items-center gap-2 mb-2">
+                                                    <button onclick="${d.state === 'service' ? `toggleDetector('DM', ${d.id})` : ''}" class="w-12 h-12 ${d.triggered ? 'bg-red-500' : 'bg-green-500'} rounded-lg border-3 border-black ${d.state === 'hors-service' ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
+                                                    <span class="text-sm font-mono w-12 flex-shrink-0 font-bold">DM${String(d.id).padStart(2, '0')}</span>
+                                                    <select onchange="changeDetectorZone('DM', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                         <option value="ZC1" ${d.zone === 'ZC1' ? 'selected' : ''}>ZC1</option>
                                                         <option value="ZC2" ${d.zone === 'ZC2' ? 'selected' : ''}>ZC2</option>
                                                         <option value="ZC3" ${d.zone === 'ZC3' ? 'selected' : ''}>ZC3</option>
                                                     </select>
-                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DM', ${d.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                                                    <select onchange="changeDetectorState('DM', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DM', ${d.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <select onchange="changeDetectorState('DM', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                         <option value="service" ${d.state === 'service' ? 'selected' : ''}>OK</option>
                                                         <option value="hors-service" ${d.state === 'hors-service' ? 'selected' : ''}>HS</option>
                                                     </select>
-                                                    <button onclick="resetDM(${d.id})" class="px-1 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600">↻</button>
+                                                    <button onclick="resetDM(${d.id})" class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 flex-shrink-0 font-bold">↻</button>
                                                 </div>
                                             `).join('')}
                                         </div>
