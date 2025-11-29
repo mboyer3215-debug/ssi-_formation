@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Formation SSI - SSIAP</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- Firebase SDK via unpkg (autorisé par CSP) -->
+    <script src="https://unpkg.com/firebase@10.7.1/firebase-app-compat.js"></script>
+    <script src="https://unpkg.com/firebase@10.7.1/firebase-database-compat.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -135,6 +137,40 @@
             }
         });
 
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyAV4UZ_j2M017lZoFdcbyuxe1oV7VxjWLs",
+            authDomain: "ssi-ssiap-training.firebaseapp.com",
+            databaseURL: "https://ssi-ssiap-training-default-rtdb.firebaseio.com",
+            projectId: "ssi-ssiap-training",
+            storageBucket: "ssi-ssiap-training.firebasestorage.app",
+            messagingSenderId: "1024486187072",
+            appId: "1:1024486187072:web:4e452ab8549cac24d3ffa5"
+        };
+
+        // Initialize Firebase
+        let db = null;
+        let firebaseInitialized = false;
+
+        // Attendre que Firebase soit chargé
+        window.addEventListener('load', () => {
+            try {
+                if (typeof firebase !== 'undefined') {
+                    firebase.initializeApp(firebaseConfig);
+                    db = firebase.database();
+                    firebaseInitialized = true;
+                    console.log('✓ Firebase initialized successfully');
+
+                    // Charger les stagiaires depuis Firebase
+                    loadTraineesFromFirebase();
+                } else {
+                    console.error('✗ Firebase library not loaded');
+                }
+            } catch (error) {
+                console.error('✗ Firebase initialization error:', error);
+            }
+        });
+
         // Application State
         const STATE = {
             currentView: 'home',
@@ -142,6 +178,8 @@
             userType: null,
             trainees: [],
             currentSession: null,
+            sessionActive: false,
+            sessionId: null,
             accessLevel: 1,
             smsiAccessLevel: 1,
 
@@ -220,22 +258,131 @@
             actionLog: []
         };
 
-        // Communication via BroadcastChannel
-        const channel = new BroadcastChannel('ssi_training');
-
-        channel.onmessage = (event) => {
-            const { type, data } = event.data;
-
-            if (STATE.userType === 'trainee') {
-                handleSupervisorCommand(type, data);
-            } else if (STATE.userType === 'supervisor') {
-                handleTraineeAction(type, data);
-            }
-        };
-
+        // Communication via Firebase
         function sendMessage(type, data) {
-            channel.postMessage({ type, data, sender: STATE.userType, timestamp: new Date().toISOString() });
+            if (!firebaseInitialized || !STATE.sessionId) return;
+
+            const messageRef = db.ref(`sessions/${STATE.sessionId}/messages`).push();
+            messageRef.set({
+                type,
+                data,
+                sender: STATE.userType,
+                timestamp: firebase.database.ServerValue.TIMESTAMP
+            });
         }
+
+        function listenToSession(sessionId) {
+            if (!firebaseInitialized) return;
+
+            const messagesRef = db.ref(`sessions/${sessionId}/messages`);
+            messagesRef.on('child_added', (snapshot) => {
+                const message = snapshot.val();
+
+                if (message.sender === STATE.userType) return; // Ignore own messages
+
+                if (STATE.userType === 'trainee') {
+                    handleSupervisorCommand(message.type, message.data);
+                } else if (STATE.userType === 'supervisor') {
+                    handleTraineeAction(message.type, message.data);
+                }
+            });
+        }
+
+        // Session Management
+        function createSession() {
+            if (!firebaseInitialized) {
+                showCustomAlert('Erreur: Firebase non disponible');
+                return;
+            }
+
+            const sessionId = Date.now().toString();
+            const sessionData = {
+                id: sessionId,
+                startTime: firebase.database.ServerValue.TIMESTAMP,
+                endTime: null,
+                active: true,
+                supervisor: STATE.currentUser || 'Superviseur',
+                trainees: {}
+            };
+
+            db.ref(`active_session`).set(sessionId);
+            db.ref(`sessions/${sessionId}`).set(sessionData);
+
+            STATE.sessionActive = true;
+            STATE.sessionId = sessionId;
+
+            listenToSession(sessionId);
+            render();
+
+            showCustomAlert('Session démarrée avec succès !');
+        }
+
+        function endSession() {
+            if (!STATE.sessionActive || !STATE.sessionId) return;
+
+            showCustomConfirm('Êtes-vous sûr de vouloir terminer la session ?', () => {
+                db.ref(`sessions/${STATE.sessionId}`).update({
+                    endTime: firebase.database.ServerValue.TIMESTAMP,
+                    active: false
+                });
+
+                db.ref(`active_session`).remove();
+
+                STATE.sessionActive = false;
+                STATE.sessionId = null;
+
+                render();
+                showCustomAlert('Session terminée.');
+            });
+        }
+
+        function joinActiveSession() {
+            if (!firebaseInitialized) return;
+
+            db.ref('active_session').once('value', (snapshot) => {
+                const sessionId = snapshot.val();
+
+                if (sessionId) {
+                    STATE.sessionId = sessionId;
+                    STATE.sessionActive = true;
+
+                    // Register trainee in session
+                    if (STATE.currentUser) {
+                        db.ref(`sessions/${sessionId}/trainees/${STATE.currentUser.id}`).set({
+                            nom: STATE.currentUser.nom,
+                            prenom: STATE.currentUser.prenom,
+                            niveau: STATE.currentUser.niveau,
+                            joinedAt: firebase.database.ServerValue.TIMESTAMP
+                        });
+                    }
+
+                    listenToSession(sessionId);
+                    render();
+                } else {
+                    showCustomAlert('Aucune session active. Le superviseur doit d\'abord démarrer une session.');
+                    navigate('home');
+                }
+            });
+        }
+
+        function checkSessionBeforeAction() {
+            if (STATE.userType === 'supervisor' && !STATE.sessionActive) {
+                showCustomConfirm('Aucune session active. Voulez-vous démarrer une session maintenant ?', () => {
+                    createSession();
+                });
+                return false;
+            }
+            return true;
+        }
+
+        // Warning before closing page
+        window.addEventListener('beforeunload', (e) => {
+            if (STATE.userType === 'supervisor' && STATE.sessionActive) {
+                e.preventDefault();
+                e.returnValue = 'Attention: La session est toujours active. Pensez à terminer la session avant de quitter.';
+                return e.returnValue;
+            }
+        });
 
         function logAction(action, details = '') {
             const log = {
@@ -299,6 +446,9 @@
         }
 
         function handleTraineeAction(type, data) {
+            if (type === 'ACTION_LOG') {
+                STATE.actionLog.push(data);
+            }
             render();
         }
 
@@ -341,11 +491,17 @@
 
                 addSmsiMessage(`Alarme détectée: ${detector.address}`);
 
-                // Start temporization if configured
-                if (STATE.uga.temporization > 0 && !STATE.uga.temporizationActive && !STATE.uga.alarmActive) {
-                    STATE.uga.temporizationActive = true;
-                    STATE.uga.temporizationRemaining = STATE.uga.temporization * 60;
-                    startTemporization();
+                // Handle temporization or immediate alarm
+                if (!STATE.uga.alarmActive) {
+                    if (STATE.uga.temporization > 0 && !STATE.uga.temporizationActive) {
+                        // Start temporization
+                        STATE.uga.temporizationActive = true;
+                        STATE.uga.temporizationRemaining = STATE.uga.temporization * 60;
+                        startTemporization();
+                    } else if (STATE.uga.temporization === 0) {
+                        // No temporization: trigger alarm immediately
+                        triggerGeneralAlarm();
+                    }
                 }
 
                 // Jouer le son uniquement si demandé (côté stagiaire)
@@ -733,37 +889,236 @@
             });
         }
 
-        // Trainee Management
+        // Trainee Management - Auto-import on startup
+        let importOffered = false;
+
         function saveTrainees() {
-            // Data stored in memory only
+            // Save to Firebase for multi-PC access
+            if (firebaseInitialized) {
+                db.ref('trainees').set(STATE.trainees);
+            }
+        }
+
+        function loadTraineesFromFirebase() {
+            if (!firebaseInitialized) return;
+
+            db.ref('trainees').once('value', (snapshot) => {
+                const trainees = snapshot.val();
+                if (trainees) {
+                    STATE.trainees = trainees;
+                    render();
+                }
+            });
+
+            // Listen for changes
+            db.ref('trainees').on('value', (snapshot) => {
+                const trainees = snapshot.val();
+                if (trainees) {
+                    STATE.trainees = trainees;
+                    if (STATE.currentView === 'trainee-management' || STATE.currentView === 'trainee-login') {
+                        render();
+                    }
+                }
+            });
+        }
+
+        function autoImportOnStartup() {
+            // Si Firebase est actif, les stagiaires sont déjà chargés automatiquement
+            if (firebaseInitialized) {
+                // Pas besoin de demander l'import, tout est synchronisé via Firebase
+                return;
+            }
+
+            // Fallback: import manuel si Firebase n'est pas disponible
+            if (STATE.trainees.length === 0 && !importOffered) {
+                importOffered = true;
+                setTimeout(() => {
+                    showCustomConfirm('Voulez-vous importer le fichier stagiaires.json ?', () => {
+                        importTrainees();
+                    });
+                }, 300);
+            }
+        }
+
+        function printTraineeList() {
+            if (STATE.trainees.length === 0) {
+                showCustomAlert('Aucun stagiaire à imprimer');
+                return;
+            }
+
+            const printWindow = window.open('', '_blank');
+            const html = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Liste des Stagiaires - Formation SSI SSIAP</title>
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            padding: 20px;
+                            max-width: 800px;
+                            margin: 0 auto;
+                        }
+                        h1 {
+                            text-align: center;
+                            color: #5D5CDE;
+                            margin-bottom: 30px;
+                        }
+                        table {
+                            width: 100%;
+                            border-collapse: collapse;
+                            margin-top: 20px;
+                        }
+                        th, td {
+                            border: 1px solid #333;
+                            padding: 12px;
+                            text-align: left;
+                        }
+                        th {
+                            background-color: #5D5CDE;
+                            color: white;
+                            font-weight: bold;
+                        }
+                        tr:nth-child(even) {
+                            background-color: #f9f9f9;
+                        }
+                        .pin {
+                            font-weight: bold;
+                            font-size: 18px;
+                            letter-spacing: 2px;
+                            color: #5D5CDE;
+                        }
+                        .footer {
+                            margin-top: 30px;
+                            text-align: center;
+                            font-size: 12px;
+                            color: #666;
+                        }
+                        @media print {
+                            button { display: none; }
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h1>Liste des Stagiaires - Formation SSI SSIAP</h1>
+                    <p>Date d'impression : ${new Date().toLocaleDateString('fr-FR', {
+                        year: 'numeric',
+                        month: 'long',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    })}</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Nom</th>
+                                <th>Prénom</th>
+                                <th>Email</th>
+                                <th>Code PIN</th>
+                                <th>Niveau</th>
+                                <th>Dates</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${STATE.trainees.map(t => `
+                                <tr>
+                                    <td>${t.nom}</td>
+                                    <td>${t.prenom}</td>
+                                    <td>${t.email || 'N/A'}</td>
+                                    <td class="pin">${t.pin}</td>
+                                    <td>SSIAP ${t.niveau}</td>
+                                    <td>${new Date(t.dateDebut).toLocaleDateString('fr-FR')} - ${new Date(t.dateFin).toLocaleDateString('fr-FR')}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    <div class="footer">
+                        <p>Formation SSI - SSIAP | Total : ${STATE.trainees.length} stagiaire(s)</p>
+                    </div>
+                </body>
+                </html>
+            `;
+
+            printWindow.document.write(html);
+            printWindow.document.close();
+            setTimeout(() => {
+                printWindow.print();
+            }, 250);
+        }
+
+        function exportTrainees() {
+            const dataStr = JSON.stringify(STATE.trainees, null, 2);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'stagiaires.json';
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function importTrainees() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'application/json';
+            input.onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const imported = JSON.parse(event.target.result);
+                        if (Array.isArray(imported)) {
+                            STATE.trainees = imported;
+                            render();
+                            showCustomAlert(`${imported.length} stagiaire(s) importé(s) avec succès`);
+                        } else {
+                            showCustomAlert('Format de fichier invalide');
+                        }
+                    } catch (error) {
+                        showCustomAlert('Erreur lors de la lecture du fichier');
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
+        }
+
+        function checkTraineeAccess(trainee) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            const dateDebut = new Date(trainee.dateDebut);
+            dateDebut.setHours(0, 0, 0, 0);
+
+            const dateFin = new Date(trainee.dateFin);
+            dateFin.setHours(23, 59, 59, 999);
+
+            return today >= dateDebut && today <= dateFin;
         }
 
         function createTrainee(data) {
+            // Generate a unique 4-digit PIN
+            let pin;
+            do {
+                pin = String(Math.floor(1000 + Math.random() * 9000));
+            } while (STATE.trainees.some(t => t.pin === pin));
+
             const trainee = {
                 id: Date.now(),
                 nom: data.nom,
                 prenom: data.prenom,
+                email: data.email,
                 niveau: data.niveau,
                 dateDebut: data.dateDebut,
                 dateFin: data.dateFin,
-                qrCode: `SSIAP-${data.nom}-${data.prenom}-${Date.now()}`
+                pin: pin
             };
 
             STATE.trainees.push(trainee);
             saveTrainees();
             return trainee;
-        }
-
-        function generateQRCode(containerId, text) {
-            const container = document.getElementById(containerId);
-            if (container) {
-                container.innerHTML = '';
-                new QRCode(container, {
-                    text: text,
-                    width: 200,
-                    height: 200
-                });
-            }
         }
 
         // Navigation
@@ -790,11 +1145,7 @@
                     break;
                 case 'trainee-management':
                     app.innerHTML = renderTraineeManagement();
-                    setTimeout(() => {
-                        STATE.trainees.forEach(trainee => {
-                            generateQRCode(`qr-${trainee.id}`, trainee.qrCode);
-                        });
-                    }, 100);
+                    autoImportOnStartup();
                     break;
                 case 'create-trainee':
                     app.innerHTML = renderCreateTrainee();
@@ -822,11 +1173,6 @@
                                 <h2 class="text-2xl font-bold text-white mb-4">🎓 Stagiaire</h2>
                                 <p class="text-white opacity-90">Se connecter et réaliser les exercices</p>
                             </div>
-                        </div>
-                        <div class="mt-6 text-center">
-                            <button onclick="navigate('trainee-management')" class="px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition">
-                                📋 Gestion des stagiaires
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -860,20 +1206,18 @@
                 <div class="min-h-screen flex items-center justify-center p-4">
                     <div class="max-w-md w-full bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg">
                         <h2 class="text-2xl font-bold mb-6">Connexion Stagiaire</h2>
-                        <div class="space-y-4">
-                            <p class="text-sm text-gray-600 dark:text-gray-400">Sélectionnez votre profil:</p>
-                            <div class="space-y-2 max-h-96 overflow-y-auto">
-                                ${STATE.trainees.map(trainee => `
-                                    <div onclick="handleTraineeLogin('${trainee.id}')" class="cursor-pointer p-4 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition">
-                                        <div class="font-bold">${trainee.prenom} ${trainee.nom}</div>
-                                        <div class="text-sm text-gray-600 dark:text-gray-400">SSIAP ${trainee.niveau}</div>
-                                    </div>
-                                `).join('')}
+                        <form onsubmit="handleTraineePinLogin(event)" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Code PIN (4 chiffres)</label>
+                                <input type="password" id="trainee-pin" maxlength="4" pattern="[0-9]{4}" class="w-full px-3 py-2 text-base border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-center text-2xl tracking-widest" required placeholder="••••">
                             </div>
-                            <button onclick="navigate('home')" class="w-full px-4 py-3 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
+                            <button type="submit" class="w-full px-4 py-3 bg-primary text-white rounded hover:bg-opacity-90 transition">
+                                Se connecter
+                            </button>
+                            <button type="button" onclick="navigate('home')" class="w-full px-4 py-3 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
                                 Retour
                             </button>
-                        </div>
+                        </form>
                     </div>
                 </div>
             `;
@@ -883,31 +1227,67 @@
             return `
                 <div class="min-h-screen p-4">
                     <div class="max-w-6xl mx-auto">
-                        <div class="flex justify-between items-center mb-6">
+                        <div class="flex justify-between items-center mb-4">
                             <h2 class="text-3xl font-bold">Gestion des Stagiaires</h2>
                             <div class="space-x-2">
+                                <button onclick="importTrainees()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition">
+                                    📥 Importer
+                                </button>
+                                <button onclick="exportTrainees()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">
+                                    📤 Exporter
+                                </button>
+                                <button onclick="printTraineeList()" class="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 transition">
+                                    🖨️ Imprimer
+                                </button>
                                 <button onclick="navigate('create-trainee')" class="px-4 py-2 bg-primary text-white rounded hover:bg-opacity-90 transition">
                                     ➕ Créer un stagiaire
                                 </button>
-                                <button onclick="navigate('home')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
+                                <button onclick="navigate('supervisor-interface')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
                                     Retour
                                 </button>
                             </div>
                         </div>
+                        ${STATE.trainees.length > 0 && firebaseInitialized ? `
+                        <div class="bg-blue-100 dark:bg-blue-900 border-l-4 border-blue-500 p-4 mb-6">
+                            <p class="text-sm text-blue-800 dark:text-blue-200">
+                                💡 <strong>Info :</strong> Les stagiaires sont synchronisés automatiquement via le cloud. Accessibles depuis tous les PC !
+                            </p>
+                        </div>
+                        ` : STATE.trainees.length > 0 ? `
+                        <div class="bg-yellow-100 dark:bg-yellow-900 border-l-4 border-yellow-500 p-4 mb-6">
+                            <p class="text-sm text-yellow-800 dark:text-yellow-200">
+                                ⚠️ <strong>Mode local :</strong> Exportez régulièrement le fichier stagiaires.json comme sauvegarde.
+                            </p>
+                        </div>
+                        ` : ''}
                         <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                            ${STATE.trainees.map(trainee => `
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
-                                    <h3 class="text-xl font-bold mb-2">${trainee.prenom} ${trainee.nom}</h3>
+                            ${STATE.trainees.map(trainee => {
+                                const isActive = checkTraineeAccess(trainee);
+                                const dateDebut = new Date(trainee.dateDebut).toLocaleDateString('fr-FR');
+                                const dateFin = new Date(trainee.dateFin).toLocaleDateString('fr-FR');
+                                return `
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg ${isActive ? 'border-2 border-green-500' : 'border-2 border-gray-400 opacity-75'}">
+                                    <div class="flex justify-between items-start mb-2">
+                                        <h3 class="text-xl font-bold">${trainee.prenom} ${trainee.nom}</h3>
+                                        <span class="px-2 py-1 rounded text-xs font-bold ${isActive ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}">
+                                            ${isActive ? '✓ Actif' : '✗ Inactif'}
+                                        </span>
+                                    </div>
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                                        Email: ${trainee.email || 'N/A'}<br>
                                         Niveau: SSIAP ${trainee.niveau}<br>
-                                        Du ${trainee.dateDebut} au ${trainee.dateFin}
+                                        Du ${dateDebut} au ${dateFin}
                                     </p>
-                                    <div id="qr-${trainee.id}" class="flex justify-center mb-4"></div>
+                                    <div class="bg-primary text-white p-4 rounded-lg mb-4 text-center">
+                                        <div class="text-xs mb-1">Code PIN</div>
+                                        <div class="text-3xl font-bold tracking-widest">${trainee.pin}</div>
+                                    </div>
                                     <button onclick="deleteTrainee(${trainee.id})" class="w-full px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition">
                                         Supprimer
                                     </button>
                                 </div>
-                            `).join('')}
+                            `;
+                            }).join('')}
                         </div>
                     </div>
                 </div>
@@ -927,6 +1307,10 @@
                             <div>
                                 <label class="block text-sm font-medium mb-2">Prénom</label>
                                 <input type="text" id="prenom" class="w-full px-3 py-2 text-base border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" required>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Email</label>
+                                <input type="email" id="email" class="w-full px-3 py-2 text-base border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" required>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-2">Niveau SSIAP</label>
@@ -962,10 +1346,38 @@
                     <div class="max-w-7xl mx-auto">
                         <div class="flex justify-between items-center mb-6">
                             <h2 class="text-3xl font-bold">Interface Superviseur</h2>
-                            <button onclick="navigate('home')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
-                                Déconnexion
-                            </button>
+                            <div class="space-x-2">
+                                ${!STATE.sessionActive ? `
+                                    <button onclick="createSession()" class="px-6 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition font-bold">
+                                        🚀 Début de session
+                                    </button>
+                                ` : `
+                                    <button onclick="endSession()" class="px-6 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition font-bold">
+                                        ⏹️ Fin de session
+                                    </button>
+                                `}
+                                <button onclick="navigate('trainee-management')" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">
+                                    📋 Gestion stagiaires
+                                </button>
+                                <button onclick="navigate('home')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
+                                    Déconnexion
+                                </button>
+                            </div>
                         </div>
+
+                        ${STATE.sessionActive ? `
+                        <div class="bg-green-100 dark:bg-green-900 border-l-4 border-green-500 p-4 mb-6">
+                            <p class="text-sm text-green-800 dark:text-green-200">
+                                ✅ <strong>Session active</strong> - Les stagiaires peuvent maintenant se connecter et travailler en temps réel.
+                            </p>
+                        </div>
+                        ` : `
+                        <div class="bg-yellow-100 dark:bg-yellow-900 border-l-4 border-yellow-500 p-4 mb-6">
+                            <p class="text-sm text-yellow-800 dark:text-yellow-200">
+                                ⚠️ <strong>Aucune session active</strong> - Cliquez sur "🚀 Début de session" pour commencer.
+                            </p>
+                        </div>
+                        `}
 
                         <!-- SDI Controls -->
                         <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
@@ -1050,11 +1462,11 @@
                                         </div>
                                     </div>
                                 </div>
-                            </div>
+                        </div>
 
-                            <!-- SMSI Controls -->
-                            <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
-                                <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
+                        <!-- SMSI Controls -->
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
+                            <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
 
                                 <div class="space-y-4">
                                     <div class="grid grid-cols-2 gap-4">
@@ -1393,11 +1805,30 @@
             }
         }
 
-        function handleTraineeLogin(traineeId) {
-            const trainee = STATE.trainees.find(t => t.id === parseInt(traineeId));
-            if (trainee) {
-                navigate('trainee-interface', { user: trainee, userType: 'trainee' });
+        function handleTraineePinLogin(event) {
+            event.preventDefault();
+            const pin = document.getElementById('trainee-pin').value;
+
+            const trainee = STATE.trainees.find(t => t.pin === pin);
+            if (!trainee) {
+                showCustomAlert('Code PIN incorrect');
+                return;
             }
+
+            // Vérifier les dates d'autorisation
+            if (!checkTraineeAccess(trainee)) {
+                const dateDebut = new Date(trainee.dateDebut).toLocaleDateString('fr-FR');
+                const dateFin = new Date(trainee.dateFin).toLocaleDateString('fr-FR');
+                showCustomAlert(`Accès refusé. Votre formation est autorisée du ${dateDebut} au ${dateFin}.`);
+                return;
+            }
+
+            navigate('trainee-interface', { user: trainee, userType: 'trainee' });
+
+            // Rejoindre automatiquement la session active
+            setTimeout(() => {
+                joinActiveSession();
+            }, 500);
         }
 
         function handleCreateTrainee(event) {
@@ -1406,6 +1837,7 @@
             const data = {
                 nom: document.getElementById('nom').value,
                 prenom: document.getElementById('prenom').value,
+                email: document.getElementById('email').value,
                 niveau: document.getElementById('niveau').value,
                 dateDebut: document.getElementById('dateDebut').value,
                 dateFin: document.getElementById('dateFin').value
@@ -1413,6 +1845,18 @@
 
             createTrainee(data);
             navigate('trainee-management');
+
+            // Auto-export uniquement si Firebase n'est pas disponible
+            if (!firebaseInitialized) {
+                setTimeout(() => {
+                    exportTrainees();
+                    showCustomAlert('Stagiaire créé ! Le fichier stagiaires.json a été téléchargé automatiquement.');
+                }, 100);
+            } else {
+                setTimeout(() => {
+                    showCustomAlert('Stagiaire créé et synchronisé avec le cloud !');
+                }, 100);
+            }
         }
 
         function deleteTrainee(id) {
@@ -1420,31 +1864,48 @@
                 STATE.trainees = STATE.trainees.filter(t => t.id !== id);
                 saveTrainees();
                 render();
+
+                // Auto-export uniquement si Firebase n'est pas disponible
+                if (!firebaseInitialized && STATE.trainees.length > 0) {
+                    setTimeout(() => {
+                        exportTrainees();
+                        showCustomAlert('Stagiaire supprimé ! Le fichier stagiaires.json a été mis à jour.');
+                    }, 100);
+                } else if (firebaseInitialized) {
+                    setTimeout(() => {
+                        showCustomAlert('Stagiaire supprimé et synchronisé avec le cloud !');
+                    }, 100);
+                }
             });
         }
 
         // Supervisor Controls
         function changeSdiState(state) {
+            if (!checkSessionBeforeAction()) return;
             STATE.sdi.systemState = state;
             sendMessage('SDI_STATE_CHANGE', { state });
         }
 
         function changeSdiBattery(state) {
+            if (!checkSessionBeforeAction()) return;
             STATE.sdi.batteryState = state;
             sendMessage('SDI_BATTERY_CHANGE', { state });
         }
 
         function setTemporization(minutes) {
+            if (!checkSessionBeforeAction()) return;
             STATE.uga.temporization = parseInt(minutes);
             sendMessage('SET_TEMPORIZATION', { minutes: parseInt(minutes) });
         }
 
         function setAlarmType(type) {
+            if (!checkSessionBeforeAction()) return;
             STATE.uga.alarmType = type;
             sendMessage('SET_ALARM_TYPE', { alarmType: type });
         }
 
         function toggleDetector(type, id) {
+            if (!checkSessionBeforeAction()) return;
             const detectorArray = type === 'DAI' ? STATE.sdi.detectors : STATE.sdi.manualAlarms;
             const detector = detectorArray.find(d => d.id === id);
 
@@ -1491,16 +1952,19 @@
         }
 
         function changeSmsiState(state) {
+            if (!checkSessionBeforeAction()) return;
             STATE.smsi.systemState = state;
             sendMessage('SMSI_STATE_CHANGE', { state });
         }
 
         function changeSmsBattery(state) {
+            if (!checkSessionBeforeAction()) return;
             STATE.smsi.batteryState = state;
             sendMessage('SMSI_BATTERY_CHANGE', { state });
         }
 
         function changeZoneState(zoneType, id, state) {
+            if (!checkSessionBeforeAction()) return;
             setZoneState(zoneType, id, state);
             sendMessage('SET_ZONE_STATE', { zoneType, id, state });
             render();
