@@ -163,6 +163,9 @@
 
                     // Charger les stagiaires depuis Firebase
                     loadTraineesFromFirebase();
+
+                    // Charger les journaux de session depuis Firebase
+                    loadSessionLogsFromFirebase();
                 } else {
                     console.error('✗ Firebase library not loaded');
                 }
@@ -187,6 +190,7 @@
             sdi: {
                 systemState: 'service',
                 batteryState: 'service',
+                powerState: 'secteur',
                 alarms: [],
                 detectors: Array(9).fill().map((_, i) => ({
                     id: i + 1,
@@ -194,7 +198,8 @@
                     zone: `ZC${Math.floor(i / 3) + 1}`,
                     address: `DAI ${Math.floor(i / 3) + 1}-${(i % 3) + 1}`,
                     state: 'service',
-                    triggered: false
+                    triggered: false,
+                    outOfService: false
                 })),
                 manualAlarms: Array(9).fill().map((_, i) => ({
                     id: i + 1,
@@ -202,7 +207,8 @@
                     zone: `ZC${Math.floor(i / 3) + 1}`,
                     address: `DM ${Math.floor(i / 3) + 1}-${(i % 3) + 1}`,
                     state: 'service',
-                    triggered: false
+                    triggered: false,
+                    outOfService: false
                 })),
                 alarmSound: false,
                 fireAlarmActive: false
@@ -212,6 +218,7 @@
             smsi: {
                 systemState: 'service',
                 batteryState: 'service',
+                powerState: 'secteur',
                 alarmSound: false,
                 messages: [],
                 compartmentZones: Array(3).fill().map((_, i) => ({
@@ -255,7 +262,34 @@
                 alarmActive: false
             },
 
-            actionLog: []
+            actionLog: [],
+            sessionLogs: [], // Historique de tous les journaux de session
+            sessionYear: new Date().getFullYear(), // Année en cours
+            sessionCounter: 0, // Compteur annuel de sessions (remis à 0 chaque année)
+            searchQuery: '', // Recherche dans les journaux
+
+            // Système de mise hors service
+            outOfService: [],
+            keypadInput: '',
+            workflowStep: null, // null, 'HS_TYPE', 'HS_NUMBER', 'HS_ADD_MORE', 'HS_CONFIRM', 'RS_CONFIRM', 'RS_MODE', 'RS_SELECT'
+            workflowData: {},
+
+            // WebRTC Video/Audio
+            videoEnabled: false,
+            audioEnabled: false,
+            localStream: null,
+            remoteStream: null,
+            peerConnection: null,
+
+            // Enregistrement vidéo
+            mediaRecorder: null,
+            recordedChunks: [],
+            isRecording: false,
+            recordingStartTime: null,
+
+            // Contrôle de volume audio
+            audioVolume: 0.5, // Volume par défaut (0.0 à 1.0)
+            audioMuted: true // Audio muet par défaut pour éviter le larsen
         };
 
         // Communication via Firebase
@@ -286,6 +320,69 @@
                     handleTraineeAction(message.type, message.data);
                 }
             });
+
+            // Écouter les changements de statut de la session (pour détecter la fermeture)
+            if (STATE.userType === 'trainee') {
+                const sessionRef = db.ref(`sessions/${sessionId}`);
+                sessionRef.on('value', (snapshot) => {
+                    const sessionData = snapshot.val();
+                    if (sessionData) {
+                        const wasActive = STATE.sessionActive;
+                        STATE.sessionActive = sessionData.active;
+                        STATE.sessionNumber = sessionData.sessionNumber;
+
+                        // Si la session vient d'être fermée
+                        if (wasActive && !sessionData.active) {
+                            // Arrêter automatiquement la caméra
+                            stopVideo();
+
+                            showCustomAlert('La session a été fermée par le superviseur.');
+                            render();
+
+                            // Écouter l'ouverture d'une nouvelle session
+                            watchForNewSession();
+                        } else {
+                            render();
+                        }
+                    }
+                });
+            }
+        }
+
+        function watchForNewSession() {
+            if (!firebaseInitialized || STATE.userType !== 'trainee') return;
+
+            // Surveiller l'apparition d'une nouvelle session active
+            const activeSessionRef = db.ref('active_session');
+            activeSessionRef.on('value', (snapshot) => {
+                const newSessionId = snapshot.val();
+
+                if (newSessionId && newSessionId !== STATE.sessionId) {
+                    // Une nouvelle session a été créée
+                    STATE.sessionId = newSessionId;
+                    STATE.sessionActive = true;
+
+                    // S'enregistrer dans la nouvelle session
+                    if (STATE.currentUser) {
+                        db.ref(`sessions/${newSessionId}/trainees/${STATE.currentUser.id}`).set({
+                            prenom: STATE.currentUser.prenom,
+                            nom: STATE.currentUser.nom,
+                            niveau: STATE.currentUser.niveau
+                        });
+                    }
+
+                    // Écouter cette nouvelle session
+                    listenToSession(newSessionId);
+
+                    showCustomAlert('Vous avez été connecté à une nouvelle session !');
+                    render();
+
+                    // Démarrer automatiquement la caméra
+                    setTimeout(() => {
+                        startVideo();
+                    }, 500);
+                }
+            });
         }
 
         // Session Management
@@ -295,9 +392,25 @@
                 return;
             }
 
+            // Générer le numéro de session au format AANNN
+            const currentYear = new Date().getFullYear();
+            const yearSuffix = currentYear % 100; // 2025 → 25, 2026 → 26
+
+            // Si on change d'année, réinitialiser le compteur
+            if (currentYear !== STATE.sessionYear) {
+                STATE.sessionYear = currentYear;
+                STATE.sessionCounter = 0;
+            }
+
+            STATE.sessionCounter++; // Incrémenter le compteur annuel
+            const sessionNumber = `${yearSuffix}${String(STATE.sessionCounter).padStart(3, '0')}`; // Ex: 25001
+
             const sessionId = Date.now().toString();
             const sessionData = {
                 id: sessionId,
+                sessionNumber: sessionNumber,
+                sessionYear: currentYear,
+                sessionCounter: STATE.sessionCounter,
                 startTime: firebase.database.ServerValue.TIMESTAMP,
                 endTime: null,
                 active: true,
@@ -310,29 +423,77 @@
 
             STATE.sessionActive = true;
             STATE.sessionId = sessionId;
+            STATE.currentSessionNumber = sessionNumber; // Stocker pour endSession
+            STATE.actionLog = []; // Réinitialiser le journal pour la nouvelle session
 
             listenToSession(sessionId);
             render();
 
-            showCustomAlert('Session démarrée avec succès !');
+            // Attendre un peu que le stagiaire se connecte et démarre sa caméra, puis se connecter
+            setTimeout(() => {
+                supervisorConnectToVideo();
+            }, 2000);
+
+            showCustomAlert(`Session ${sessionNumber} démarrée avec succès !`);
         }
 
         function endSession() {
             if (!STATE.sessionActive || !STATE.sessionId) return;
 
             showCustomConfirm('Êtes-vous sûr de vouloir terminer la session ?', () => {
-                db.ref(`sessions/${STATE.sessionId}`).update({
-                    endTime: firebase.database.ServerValue.TIMESTAMP,
-                    active: false
+                const sessionNumber = STATE.currentSessionNumber;
+                const sessionId = STATE.sessionId;
+
+                // Récupérer les infos des stagiaires depuis Firebase
+                db.ref(`sessions/${sessionId}/trainees`).once('value', (traineesSnapshot) => {
+                    const traineesData = traineesSnapshot.val();
+                    let traineeName = 'Inconnu';
+
+                    // Récupérer le premier stagiaire enregistré
+                    if (traineesData) {
+                        const traineeIds = Object.keys(traineesData);
+                        if (traineeIds.length > 0) {
+                            const firstTrainee = traineesData[traineeIds[0]];
+                            traineeName = `${firstTrainee.prenom || ''} ${firstTrainee.nom || ''}`.trim();
+                        }
+                    }
+
+                    // Sauvegarder le journal de session avant de terminer
+                    if (STATE.actionLog.length > 0) {
+                        const sessionLog = {
+                            sessionId: sessionId,
+                            sessionNumber: sessionNumber,
+                            sessionYear: STATE.sessionYear,
+                            sessionCounter: STATE.sessionCounter,
+                            startTime: new Date().toISOString(),
+                            endTime: new Date().toISOString(),
+                            supervisor: STATE.currentUser || 'Superviseur',
+                            trainee: traineeName,
+                            actions: [...STATE.actionLog] // Copie du journal
+                        };
+
+                        // Ajouter à l'historique local
+                        STATE.sessionLogs.push(sessionLog);
+
+                        // Sauvegarder dans Firebase
+                        db.ref(`session_logs/${sessionId}`).set(sessionLog);
+                    }
+
+                    db.ref(`sessions/${sessionId}`).update({
+                        endTime: firebase.database.ServerValue.TIMESTAMP,
+                        active: false
+                    });
+
+                    db.ref(`active_session`).remove();
+
+                    STATE.sessionActive = false;
+                    STATE.sessionId = null;
+                    STATE.currentSessionNumber = null;
+                    STATE.actionLog = []; // Effacer le journal actuel
+
+                    render();
+                    showCustomAlert(`Session ${sessionNumber} terminée. Journal sauvegardé.`);
                 });
-
-                db.ref(`active_session`).remove();
-
-                STATE.sessionActive = false;
-                STATE.sessionId = null;
-
-                render();
-                showCustomAlert('Session terminée.');
             });
         }
 
@@ -346,6 +507,14 @@
                     STATE.sessionId = sessionId;
                     STATE.sessionActive = true;
 
+                    // Récupérer les infos de session incluant sessionNumber
+                    db.ref(`sessions/${sessionId}`).once('value', (sessionSnapshot) => {
+                        const sessionData = sessionSnapshot.val();
+                        if (sessionData) {
+                            STATE.sessionNumber = sessionData.sessionNumber;
+                        }
+                    });
+
                     // Register trainee in session
                     if (STATE.currentUser) {
                         db.ref(`sessions/${sessionId}/trainees/${STATE.currentUser.id}`).set({
@@ -357,10 +526,25 @@
                     }
 
                     listenToSession(sessionId);
+                    watchForNewSession();
                     render();
+
+                    // Démarrer automatiquement la caméra pour le stagiaire
+                    setTimeout(() => {
+                        startVideo();
+                    }, 500);
                 } else {
-                    showCustomAlert('Aucune session active. Le superviseur doit d\'abord démarrer une session.');
-                    navigate('home');
+                    // Aucune session active, mais permettre l'accès à l'interface
+                    STATE.sessionActive = false;
+                    STATE.sessionId = null;
+                    STATE.sessionNumber = null;
+
+                    // Surveiller l'apparition d'une nouvelle session
+                    watchForNewSession();
+
+                    render();
+                    // Informer le stagiaire sans le bloquer
+                    showCustomAlert('En attente d\'une session. Vous serez automatiquement connecté dès que le superviseur ouvrira une session.');
                 }
             });
         }
@@ -375,6 +559,305 @@
             return true;
         }
 
+        // ============ WebRTC Video/Audio Functions ============
+        const iceServers = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        async function startVideo() {
+            try {
+                STATE.localStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 },
+                    audio: true
+                });
+
+                STATE.videoEnabled = true;
+                STATE.audioEnabled = true;
+
+                // Render va automatiquement restaurer le flux vidéo via restoreVideoStreams()
+                render();
+
+                // Créer la connexion WebRTC
+                await setupPeerConnection();
+
+                showCustomAlert('Caméra et micro activés');
+            } catch (error) {
+                console.error('Erreur accès caméra/micro:', error);
+                showCustomAlert('Impossible d\'accéder à la caméra ou au micro. Vérifiez les permissions.');
+            }
+        }
+
+        function stopVideo() {
+            if (STATE.localStream) {
+                STATE.localStream.getTracks().forEach(track => track.stop());
+                STATE.localStream = null;
+            }
+
+            if (STATE.peerConnection) {
+                STATE.peerConnection.close();
+                STATE.peerConnection = null;
+            }
+
+            STATE.videoEnabled = false;
+            STATE.audioEnabled = false;
+
+            // Notifier le superviseur
+            if (STATE.sessionId) {
+                db.ref(`sessions/${STATE.sessionId}/video/trainee_stream_active`).set(false);
+            }
+
+            render();
+        }
+
+        function toggleVideo() {
+            if (STATE.videoEnabled && STATE.localStream) {
+                const videoTrack = STATE.localStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    videoTrack.enabled = !videoTrack.enabled;
+                    STATE.videoEnabled = videoTrack.enabled;
+                    render();
+                }
+            }
+        }
+
+        function toggleAudio() {
+            if (STATE.audioEnabled && STATE.localStream) {
+                const audioTrack = STATE.localStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    audioTrack.enabled = !audioTrack.enabled;
+                    STATE.audioEnabled = audioTrack.enabled;
+                    render();
+                }
+            }
+        }
+
+        async function setupPeerConnection() {
+            if (!STATE.sessionId) return;
+
+            STATE.peerConnection = new RTCPeerConnection(iceServers);
+
+            // Ajouter les tracks locaux à la connexion
+            STATE.localStream.getTracks().forEach(track => {
+                STATE.peerConnection.addTrack(track, STATE.localStream);
+            });
+
+            // Gérer les ICE candidates
+            STATE.peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    db.ref(`sessions/${STATE.sessionId}/video/trainee_ice_candidates`).push(event.candidate.toJSON());
+                }
+            };
+
+            // Gérer le flux distant (du superviseur)
+            STATE.peerConnection.ontrack = (event) => {
+                STATE.remoteStream = event.streams[0];
+                const remoteVideo = document.getElementById('remote-video');
+                if (remoteVideo) {
+                    remoteVideo.srcObject = STATE.remoteStream;
+                }
+            };
+
+            // Créer et envoyer l'offre si on est stagiaire
+            if (STATE.userType === 'trainee') {
+                const offer = await STATE.peerConnection.createOffer();
+                await STATE.peerConnection.setLocalDescription(offer);
+
+                db.ref(`sessions/${STATE.sessionId}/video/offer`).set({
+                    type: offer.type,
+                    sdp: offer.sdp
+                });
+
+                // Marquer le stream comme actif
+                db.ref(`sessions/${STATE.sessionId}/video/trainee_stream_active`).set(true);
+
+                // Écouter la réponse du superviseur
+                db.ref(`sessions/${STATE.sessionId}/video/answer`).on('value', async (snapshot) => {
+                    const answer = snapshot.val();
+                    if (answer && STATE.peerConnection && !STATE.peerConnection.currentRemoteDescription) {
+                        await STATE.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                    }
+                });
+
+                // Écouter les ICE candidates du superviseur
+                db.ref(`sessions/${STATE.sessionId}/video/supervisor_ice_candidates`).on('child_added', async (snapshot) => {
+                    const candidate = snapshot.val();
+                    if (candidate && STATE.peerConnection) {
+                        await STATE.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                    }
+                });
+            }
+        }
+
+        async function supervisorConnectToVideo() {
+            if (!STATE.sessionId) return;
+
+            STATE.peerConnection = new RTCPeerConnection(iceServers);
+
+            // Gérer les ICE candidates
+            STATE.peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    db.ref(`sessions/${STATE.sessionId}/video/supervisor_ice_candidates`).push(event.candidate.toJSON());
+                }
+            };
+
+            // Gérer le flux distant (du stagiaire)
+            STATE.peerConnection.ontrack = (event) => {
+                STATE.remoteStream = event.streams[0];
+
+                // Render va automatiquement restaurer le flux vidéo via restoreVideoStreams()
+                render();
+            };
+
+            // Écouter l'offre du stagiaire
+            db.ref(`sessions/${STATE.sessionId}/video/offer`).once('value', async (snapshot) => {
+                const offer = snapshot.val();
+                if (offer && STATE.peerConnection) {
+                    await STATE.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+
+                    const answer = await STATE.peerConnection.createAnswer();
+                    await STATE.peerConnection.setLocalDescription(answer);
+
+                    db.ref(`sessions/${STATE.sessionId}/video/answer`).set({
+                        type: answer.type,
+                        sdp: answer.sdp
+                    });
+
+                    // Écouter les ICE candidates du stagiaire
+                    db.ref(`sessions/${STATE.sessionId}/video/trainee_ice_candidates`).on('child_added', async (snapshot) => {
+                        const candidate = snapshot.val();
+                        if (candidate && STATE.peerConnection) {
+                            await STATE.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                        }
+                    });
+                }
+            });
+        }
+
+        function disconnectVideo() {
+            if (STATE.peerConnection) {
+                STATE.peerConnection.close();
+                STATE.peerConnection = null;
+            }
+
+            STATE.remoteStream = null;
+
+            const remoteVideo = document.getElementById('trainee-video');
+            if (remoteVideo) {
+                remoteVideo.srcObject = null;
+            }
+
+            render();
+        }
+
+        // ============ Enregistrement Vidéo Functions ============
+        function startRecording() {
+            if (!STATE.remoteStream) {
+                showCustomAlert('Aucun flux vidéo disponible pour enregistrer');
+                return;
+            }
+
+            try {
+                STATE.recordedChunks = [];
+                STATE.mediaRecorder = new MediaRecorder(STATE.remoteStream, {
+                    mimeType: 'video/webm;codecs=vp9'
+                });
+
+                STATE.mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        STATE.recordedChunks.push(event.data);
+                    }
+                };
+
+                STATE.mediaRecorder.onstop = () => {
+                    // L'enregistrement est terminé, les chunks sont prêts
+                    const blob = new Blob(STATE.recordedChunks, { type: 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+
+                    // Proposer le téléchargement
+                    const sessionNumber = STATE.currentSessionNumber || 'session';
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const filename = `debriefing_${sessionNumber}_${timestamp}.webm`;
+
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+
+                    URL.revokeObjectURL(url);
+                    showCustomAlert('Enregistrement téléchargé : ' + filename);
+                };
+
+                STATE.mediaRecorder.start(1000); // Capture toutes les secondes
+                STATE.isRecording = true;
+                STATE.recordingStartTime = Date.now();
+
+                // Mettre à jour l'affichage toutes les secondes
+                STATE.recordingInterval = setInterval(() => {
+                    if (STATE.isRecording) {
+                        render();
+                    }
+                }, 1000);
+
+                render();
+                showCustomAlert('📹 Enregistrement démarré');
+            } catch (error) {
+                console.error('Erreur enregistrement:', error);
+                showCustomAlert('Erreur lors du démarrage de l\'enregistrement');
+            }
+        }
+
+        function stopRecording() {
+            if (STATE.mediaRecorder && STATE.isRecording) {
+                STATE.mediaRecorder.stop();
+                STATE.isRecording = false;
+                STATE.recordingStartTime = null;
+
+                // Arrêter l'intervalle de mise à jour
+                if (STATE.recordingInterval) {
+                    clearInterval(STATE.recordingInterval);
+                    STATE.recordingInterval = null;
+                }
+
+                render();
+                showCustomAlert('⏹️ Enregistrement arrêté. Téléchargement en cours...');
+            }
+        }
+
+        function getRecordingDuration() {
+            if (!STATE.isRecording || !STATE.recordingStartTime) return '00:00';
+
+            const elapsed = Math.floor((Date.now() - STATE.recordingStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+
+            return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+
+        // Fonction pour activer/couper le son
+        function toggleAudioMute() {
+            STATE.audioMuted = !STATE.audioMuted;
+            const remoteVideo = document.getElementById('trainee-video');
+            if (remoteVideo) {
+                remoteVideo.muted = STATE.audioMuted;
+                if (!STATE.audioMuted) {
+                    remoteVideo.volume = STATE.audioVolume;
+                }
+            }
+            render();
+        }
+
+        // Fonction pour ajuster le volume audio
+        function setAudioVolume(volume) {
+            STATE.audioVolume = parseFloat(volume);
+            const remoteVideo = document.getElementById('trainee-video');
+            if (remoteVideo && !STATE.audioMuted) {
+                remoteVideo.volume = STATE.audioVolume;
+            }
+        }
+
         // Warning before closing page
         window.addEventListener('beforeunload', (e) => {
             if (STATE.userType === 'supervisor' && STATE.sessionActive) {
@@ -384,12 +867,17 @@
             }
         });
 
-        function logAction(action, details = '') {
+        function logAction(action, details = '', actor = null) {
+            // Déterminer qui fait l'action: si actor est spécifié, on l'utilise
+            // Sinon, c'est l'utilisateur actuel (stagiaire ou superviseur)
+            const actorType = actor || STATE.userType || 'supervisor';
+
             const log = {
                 timestamp: new Date().toISOString(),
                 trainee: STATE.currentUser?.prenom + ' ' + STATE.currentUser?.nom,
                 action,
-                details
+                details,
+                actor: actorType // 'trainee' ou 'supervisor'
             };
             STATE.actionLog.push(log);
 
@@ -403,6 +891,27 @@
                 text: message,
                 timestamp: new Date().toISOString()
             });
+            // Auto-scroll vers la dernière ligne après le render
+            setTimeout(() => {
+                const screen = document.getElementById('smsi-screen');
+                if (screen) {
+                    screen.scrollTop = screen.scrollHeight;
+                }
+            }, 50);
+        }
+
+        function addSdiMessage(message) {
+            STATE.sdi.alarms.push({
+                text: message,
+                timestamp: new Date().toISOString()
+            });
+            // Auto-scroll vers la dernière ligne après le render
+            setTimeout(() => {
+                const screen = document.getElementById('sdi-screen');
+                if (screen) {
+                    screen.scrollTop = screen.scrollHeight;
+                }
+            }, 50);
         }
 
         function handleSupervisorCommand(type, data) {
@@ -412,6 +921,9 @@
                     break;
                 case 'SDI_BATTERY_CHANGE':
                     STATE.sdi.batteryState = data.state;
+                    break;
+                case 'SDI_POWER_CHANGE':
+                    STATE.sdi.powerState = data.state;
                     break;
                 case 'TRIGGER_DETECTOR':
                     // Côté stagiaire: jouer le son
@@ -435,19 +947,60 @@
                 case 'SMSI_BATTERY_CHANGE':
                     STATE.smsi.batteryState = data.state;
                     break;
+                case 'SMSI_POWER_CHANGE':
+                    STATE.smsi.powerState = data.state;
+                    break;
                 case 'SET_ZONE_STATE':
                     setZoneState(data.zoneType, data.id, data.state);
                     break;
                 case 'UPDATE_ZONE_ADDRESS':
                     updateZoneAddress(data.zoneType, data.id, data.address);
                     break;
+                case 'DETECTOR_OUT_OF_SERVICE':
+                    // Mettre à jour l'état hors service du détecteur
+                    const detArray = data.type === 'DAI' ? STATE.sdi.detectors : STATE.sdi.manualAlarms;
+                    const det = detArray.find(d => d.id === data.id);
+                    if (det) {
+                        det.outOfService = data.outOfService;
+                    }
+                    break;
+                case 'CHANGE_DETECTOR_STATE':
+                    // Mettre à jour l'état du détecteur (service/hors-service)
+                    const detectorArr = data.type === 'DAI' ? STATE.sdi.detectors : STATE.sdi.manualAlarms;
+                    const detector = detectorArr.find(d => d.id === data.id);
+                    if (detector) {
+                        detector.state = data.state;
+                    }
+                    break;
+                case 'TEST_SIGNALIZATION':
+                    // Exécuter le test de signalisation côté stagiaire
+                    testSignalization();
+                    break;
             }
             render();
         }
 
         function handleTraineeAction(type, data) {
-            if (type === 'ACTION_LOG') {
-                STATE.actionLog.push(data);
+            switch(type) {
+                case 'ACTION_LOG':
+                    STATE.actionLog.push(data);
+                    break;
+                case 'DETECTOR_OUT_OF_SERVICE':
+                    // Mettre à jour l'état hors service du détecteur côté superviseur
+                    const detArray = data.type === 'DAI' ? STATE.sdi.detectors : STATE.sdi.manualAlarms;
+                    const det = detArray.find(d => d.id === data.id);
+                    if (det) {
+                        det.outOfService = data.outOfService;
+                    }
+                    break;
+                case 'CHANGE_DETECTOR_STATE':
+                    // Mettre à jour l'état du détecteur côté superviseur
+                    const detectorArr = data.type === 'DAI' ? STATE.sdi.detectors : STATE.sdi.manualAlarms;
+                    const detector = detectorArr.find(d => d.id === data.id);
+                    if (detector) {
+                        detector.state = data.state;
+                    }
+                    break;
             }
             render();
         }
@@ -479,6 +1032,12 @@
             const detector = detectorArray.find(d => d.id === id);
 
             if (detector) {
+                // Ne pas déclencher si le détecteur est hors service
+                if (detector.outOfService || detector.state === 'hors-service') {
+                    addSdiMessage(`${detector.address} hors service - alarme ignorée`);
+                    return;
+                }
+
                 detector.triggered = true;
                 STATE.sdi.fireAlarmActive = true;
                 STATE.sdi.alarmSound = true;
@@ -504,10 +1063,12 @@
                     }
                 }
 
-                // Jouer le son uniquement si demandé (côté stagiaire)
+                // Jouer le BIP SDI uniquement si demandé (côté stagiaire)
+                // Ce bip est DIFFÉRENT de l'alarme UGA
                 if (playSound) {
                     playAlarmSound();
                 }
+
                 updateAllLeds();
             }
         }
@@ -640,8 +1201,16 @@
 
         // Audio Context for alarm sounds
         let audioContext;
-        let alarmOscillator;
-        let generalAlarmOscillator;
+        let alarmOscillator; // Pour le bip SDI
+        let generalAlarmAudio; // Pour l'alarme UGA (fichiers audio réels)
+        let generalAlarmTimer; // Timer pour arrêter l'alarme UGA après 5 minutes
+
+        // Fichiers audio des alarmes
+        const ALARM_SOUNDS = {
+            'generale': 'https://pfst.cf2.poecdn.net/base/audio/d5a97bdece6764d4519798a8cc918feff16f4780d291e79c57553f6353e17d59',
+            'generale-selective': 'https://pfst.cf2.poecdn.net/base/audio/251c4a6b98727804e0d6b211a5fc52f44f93fc7ab05d0b87103a1993ee24efda',
+            'generale-message': 'https://pfst.cf2.poecdn.net/base/audio/34c3dfba89939951e5b6c716b33d0ad9ee5ab241e1bbb651cca7f8cde12d27be'
+        };
 
         function initAudio() {
             if (!audioContext) {
@@ -676,29 +1245,57 @@
         }
 
         function playGeneralAlarm(type) {
-            initAudio();
-            if (generalAlarmOscillator) return;
+            // Le son ne joue QUE côté stagiaire (pas côté superviseur)
+            if (STATE.userType === 'supervisor') return;
 
-            generalAlarmOscillator = audioContext.createOscillator();
-            const gainNode = audioContext.createGain();
+            // Arrêter l'alarme précédente si elle existe
+            stopGeneralAlarm();
 
-            generalAlarmOscillator.connect(gainNode);
-            gainNode.connect(audioContext.destination);
+            // Jouer le fichier audio correspondant au type d'alarme
+            const soundUrl = ALARM_SOUNDS[type] || ALARM_SOUNDS['generale'];
+            generalAlarmAudio = new Audio(soundUrl);
+            generalAlarmAudio.loop = false; // On gère la boucle manuellement pour éviter les silences
+            generalAlarmAudio.volume = 0.5;
 
-            if (type === 'generale') {
-                generalAlarmOscillator.frequency.value = 500;
+            // Sauter le silence au début des fichiers audio
+            if (type === 'generale-selective') {
+                generalAlarmAudio.currentTime = 9.0; // Sauter 9 secondes de silence au début
+
+                // Gérer la boucle pour éviter le silence de 15s à la fin
+                generalAlarmAudio.addEventListener('timeupdate', function() {
+                    // Quand on arrive à 15 secondes avant la fin, on recommence
+                    if (generalAlarmAudio.duration - generalAlarmAudio.currentTime < 15) {
+                        generalAlarmAudio.currentTime = 9.0; // Revenir au début du vrai son
+                    }
+                });
+            } else if (type === 'generale-message') {
+                generalAlarmAudio.currentTime = 10.0; // Sauter 10 secondes de silence
+                generalAlarmAudio.loop = true; // Boucle normale pour celui-ci
             } else {
-                generalAlarmOscillator.frequency.value = 700;
+                generalAlarmAudio.loop = true; // Boucle normale pour alarme générale
             }
 
-            gainNode.gain.value = 0.2;
-            generalAlarmOscillator.start();
+            generalAlarmAudio.play().catch(err => {
+                console.error('Erreur lecture audio:', err);
+            });
+
+            // Timer de 5 minutes pour arrêter l'alarme automatiquement
+            if (generalAlarmTimer) clearTimeout(generalAlarmTimer);
+            generalAlarmTimer = setTimeout(() => {
+                stopGeneralAlarm();
+                addSmsiMessage('Alarme arrêtée automatiquement (5 min)');
+            }, 5 * 60 * 1000); // 5 minutes
         }
 
         function stopGeneralAlarm() {
-            if (generalAlarmOscillator) {
-                generalAlarmOscillator.stop();
-                generalAlarmOscillator = null;
+            if (generalAlarmAudio) {
+                generalAlarmAudio.pause();
+                generalAlarmAudio.currentTime = 0;
+                generalAlarmAudio = null;
+            }
+            if (generalAlarmTimer) {
+                clearTimeout(generalAlarmTimer);
+                generalAlarmTimer = null;
             }
         }
 
@@ -715,15 +1312,407 @@
                     triggerGeneralAlarm();
                 }
 
-                render();
+                // Mise à jour uniquement de l'affichage du compteur sans re-render complet
+                updateTemporizationDisplay();
             }, 1000);
+        }
+
+        function updateTemporizationDisplay() {
+            // Mise à jour du compteur de temporisation sans re-render complet
+            const displays = document.querySelectorAll('.temporization-display');
+            displays.forEach(display => {
+                if (STATE.uga.temporizationActive) {
+                    const minutes = Math.floor(STATE.uga.temporizationRemaining / 60);
+                    const seconds = STATE.uga.temporizationRemaining % 60;
+                    display.textContent = `⏱️ ${minutes}:${String(seconds).padStart(2, '0')}`;
+                } else {
+                    display.textContent = '';
+                }
+            });
+        }
+
+        function scrollScreen(screenId, action) {
+            const screen = document.getElementById(screenId);
+            if (!screen) return;
+
+            const lineHeight = 20; // hauteur approximative d'une ligne en pixels
+
+            switch(action) {
+                case 'up':
+                    // Monter d'une ligne
+                    screen.scrollTop -= lineHeight;
+                    break;
+                case 'down':
+                    // Descendre d'une ligne
+                    screen.scrollTop += lineHeight;
+                    break;
+                case 'first':
+                    // Aller à la première ligne
+                    screen.scrollTop = 0;
+                    break;
+                case 'last':
+                    // Aller à la dernière ligne
+                    screen.scrollTop = screen.scrollHeight;
+                    break;
+                case 'home':
+                    // Retour à la position centrale
+                    screen.scrollTop = screen.scrollHeight / 2;
+                    break;
+            }
+        }
+
+        // Pavé numérique
+        function keypadPress(key) {
+            if (key === 'C') {
+                STATE.keypadInput = '';
+            } else {
+                STATE.keypadInput += key;
+            }
+            render();
+        }
+
+        function keypadValidate() {
+            if (!STATE.keypadInput) return;
+
+            // Si en mode niveau 2, vérifier le code
+            if (STATE.workflowStep === 'LEVEL2_CODE') {
+                checkLevel2Code();
+                return;
+            }
+
+            // Sinon, gérer selon le workflow actif
+            if (STATE.workflowStep) {
+                handleWorkflowInput(STATE.keypadInput);
+            }
+        }
+
+        function checkLevel2Code() {
+            if (STATE.keypadInput === '1234') {
+                if (STATE.workflowData.system === 'sdi') {
+                    STATE.accessLevel = 2;
+                } else {
+                    STATE.smsiAccessLevel = 2;
+                }
+                addSdiMessage('Niveau 2 activé');
+                STATE.keypadInput = '';
+                STATE.workflowStep = null;
+                STATE.workflowData = {};
+                render();
+            } else {
+                addSdiMessage('Code incorrect');
+                STATE.keypadInput = '';
+                render();
+            }
+        }
+
+        // Workflow Mise Hors Service
+        function startOutOfServiceWorkflow() {
+            if (STATE.accessLevel !== 2) {
+                addSdiMessage('Niveau 2 requis');
+                return;
+            }
+
+            STATE.workflowStep = 'HS_TYPE';
+            STATE.workflowData = {};
+            STATE.keypadInput = '';
+            addSdiMessage('Vous voulez mettre hors service:');
+            addSdiMessage('1) DAI');
+            addSdiMessage('2) DM');
+            addSdiMessage('3) Zone');
+            render();
+        }
+
+        // Workflow Remise en Service
+        function startBackInServiceWorkflow() {
+            if (STATE.accessLevel !== 2) {
+                addSdiMessage('Niveau 2 requis');
+                return;
+            }
+
+            if (STATE.outOfService.length === 0) {
+                addSdiMessage('Aucun matériel hors service');
+                return;
+            }
+
+            STATE.workflowStep = 'RS_CONFIRM';
+            STATE.workflowData = {};
+            STATE.keypadInput = '';
+            addSdiMessage('Vous voulez remettre les matériels en service');
+            addSdiMessage('1) oui');
+            addSdiMessage('2) non');
+            render();
+        }
+
+        // Gestion des entrées du workflow
+        function handleWorkflowInput(input) {
+            const value = input.trim();
+            STATE.keypadInput = '';
+
+            switch(STATE.workflowStep) {
+                case 'HS_TYPE':
+                    handleHSType(value);
+                    break;
+                case 'HS_NUMBER':
+                    handleHSNumber(value);
+                    break;
+                case 'HS_ADD_MORE':
+                    handleHSAddMore(value);
+                    break;
+                case 'HS_CONFIRM':
+                    handleHSConfirm(value);
+                    break;
+                case 'RS_CONFIRM':
+                    handleRSConfirm(value);
+                    break;
+                case 'RS_MODE':
+                    handleRSMode(value);
+                    break;
+                case 'RS_SELECT':
+                    handleRSSelect(value);
+                    break;
+            }
+        }
+
+        function handleHSType(value) {
+            if (value === '1') {
+                STATE.workflowData.type = 'DAI';
+                STATE.workflowData.typeName = 'DAI';
+            } else if (value === '2') {
+                STATE.workflowData.type = 'DM';
+                STATE.workflowData.typeName = 'DM';
+            } else if (value === '3') {
+                STATE.workflowData.type = 'Zone';
+                STATE.workflowData.typeName = 'Zone';
+            } else {
+                addSdiMessage('Choix invalide');
+                render();
+                return;
+            }
+
+            STATE.workflowStep = 'HS_NUMBER';
+            addSdiMessage(`Donnez le numéro du ${STATE.workflowData.typeName} à mettre hors service`);
+            render();
+        }
+
+        function handleHSNumber(value) {
+            const number = parseInt(value);
+
+            if (STATE.workflowData.type === 'DAI') {
+                const exists = STATE.sdi.detectors.some(d => d.id === number);
+                if (!exists || number < 1 || number > 9) {
+                    addSdiMessage('Numéro DAI invalide (1-9)');
+                    render();
+                    return;
+                }
+                STATE.workflowData.number = number;
+                STATE.workflowData.label = `DAI${String(number).padStart(2, '0')}`;
+            } else if (STATE.workflowData.type === 'DM') {
+                const exists = STATE.sdi.manualAlarms.some(d => d.id === number);
+                if (!exists || number < 1 || number > 9) {
+                    addSdiMessage('Numéro DM invalide (1-9)');
+                    render();
+                    return;
+                }
+                STATE.workflowData.number = number;
+                STATE.workflowData.label = `DM${String(number).padStart(2, '0')}`;
+            } else if (STATE.workflowData.type === 'Zone') {
+                if (number < 1 || number > 3) {
+                    addSdiMessage('Numéro Zone invalide (1-3)');
+                    render();
+                    return;
+                }
+                STATE.workflowData.number = number;
+                STATE.workflowData.label = `ZC${number}`;
+            }
+
+            STATE.workflowStep = 'HS_ADD_MORE';
+            addSdiMessage('Voulez-vous ajouter un matériel');
+            addSdiMessage('1) oui');
+            addSdiMessage('2) non');
+            render();
+        }
+
+        function handleHSAddMore(value) {
+            if (value === '1') {
+                if (!STATE.workflowData.items) STATE.workflowData.items = [];
+                STATE.workflowData.items.push({
+                    type: STATE.workflowData.type,
+                    number: STATE.workflowData.number,
+                    label: STATE.workflowData.label
+                });
+                STATE.workflowStep = 'HS_TYPE';
+                addSdiMessage('Vous voulez mettre hors service:');
+                addSdiMessage('1) DAI');
+                addSdiMessage('2) DM');
+                addSdiMessage('3) Zone');
+                render();
+            } else if (value === '2') {
+                if (!STATE.workflowData.items) STATE.workflowData.items = [];
+                STATE.workflowData.items.push({
+                    type: STATE.workflowData.type,
+                    number: STATE.workflowData.number,
+                    label: STATE.workflowData.label
+                });
+                STATE.workflowStep = 'HS_CONFIRM';
+                addSdiMessage('Vous avez mis hors service:');
+                STATE.workflowData.items.forEach(item => {
+                    addSdiMessage(`- ${item.label}`);
+                });
+                addSdiMessage('Validez:');
+                addSdiMessage('1) oui');
+                addSdiMessage('2) non');
+                render();
+            } else {
+                addSdiMessage('Choix invalide');
+                render();
+            }
+        }
+
+        function handleHSConfirm(value) {
+            if (value === '1') {
+                STATE.workflowData.items.forEach(item => {
+                    STATE.outOfService.push(item);
+                    if (item.type === 'DAI') {
+                        const detector = STATE.sdi.detectors.find(d => d.id === item.number);
+                        if (detector) {
+                            detector.outOfService = true;
+                            // Synchroniser avec Firebase
+                            sendMessage('DETECTOR_OUT_OF_SERVICE', { type: 'DAI', id: item.number, outOfService: true });
+                        }
+                    } else if (item.type === 'DM') {
+                        const dm = STATE.sdi.manualAlarms.find(d => d.id === item.number);
+                        if (dm) {
+                            dm.outOfService = true;
+                            // Synchroniser avec Firebase
+                            sendMessage('DETECTOR_OUT_OF_SERVICE', { type: 'DM', id: item.number, outOfService: true });
+                        }
+                    }
+                    addSdiMessage(`${item.label} mis hors service`);
+                    logAction(`Mise hors service ${item.label}`);
+                });
+                STATE.workflowStep = null;
+                STATE.workflowData = {};
+                render();
+            } else if (value === '2') {
+                addSdiMessage('Mise hors service annulée');
+                STATE.workflowStep = null;
+                STATE.workflowData = {};
+                render();
+            } else {
+                addSdiMessage('Choix invalide');
+                render();
+            }
+        }
+
+        function handleRSConfirm(value) {
+            if (value === '1') {
+                STATE.workflowStep = 'RS_MODE';
+                addSdiMessage('Voulez-vous:');
+                addSdiMessage('1) tout remettre en service');
+                addSdiMessage('2) une partie');
+                render();
+            } else if (value === '2') {
+                addSdiMessage('Remise en service annulée');
+                STATE.workflowStep = null;
+                STATE.workflowData = {};
+                render();
+            } else {
+                addSdiMessage('Choix invalide');
+                render();
+            }
+        }
+
+        function handleRSMode(value) {
+            if (value === '1') {
+                STATE.outOfService.forEach(item => {
+                    if (item.type === 'DAI') {
+                        const detector = STATE.sdi.detectors.find(d => d.id === item.number);
+                        if (detector) {
+                            detector.outOfService = false;
+                            // Synchroniser avec Firebase
+                            sendMessage('DETECTOR_OUT_OF_SERVICE', { type: 'DAI', id: item.number, outOfService: false });
+                        }
+                    } else if (item.type === 'DM') {
+                        const dm = STATE.sdi.manualAlarms.find(d => d.id === item.number);
+                        if (dm) {
+                            dm.outOfService = false;
+                            // Synchroniser avec Firebase
+                            sendMessage('DETECTOR_OUT_OF_SERVICE', { type: 'DM', id: item.number, outOfService: false });
+                        }
+                    }
+                    addSdiMessage(`${item.label} remis en service`);
+                    logAction(`Remise en service ${item.label}`);
+                });
+                STATE.outOfService = [];
+                addSdiMessage('Tous les matériels remis en service');
+                STATE.workflowStep = null;
+                STATE.workflowData = {};
+                render();
+            } else if (value === '2') {
+                STATE.workflowStep = 'RS_SELECT';
+                addSdiMessage('Matériels hors service:');
+                STATE.outOfService.forEach((item, index) => {
+                    addSdiMessage(`${index + 1}) ${item.label}`);
+                });
+                addSdiMessage('Tapez le numéro à remettre en service');
+                render();
+            } else {
+                addSdiMessage('Choix invalide');
+                render();
+            }
+        }
+
+        function handleRSSelect(value) {
+            const index = parseInt(value) - 1;
+            if (index < 0 || index >= STATE.outOfService.length) {
+                addSdiMessage('Numéro invalide');
+                render();
+                return;
+            }
+            const item = STATE.outOfService[index];
+            if (item.type === 'DAI') {
+                const detector = STATE.sdi.detectors.find(d => d.id === item.number);
+                if (detector) {
+                    detector.outOfService = false;
+                    // Synchroniser avec Firebase
+                    sendMessage('DETECTOR_OUT_OF_SERVICE', { type: 'DAI', id: item.number, outOfService: false });
+                }
+            } else if (item.type === 'DM') {
+                const dm = STATE.sdi.manualAlarms.find(d => d.id === item.number);
+                if (dm) {
+                    dm.outOfService = false;
+                    // Synchroniser avec Firebase
+                    sendMessage('DETECTOR_OUT_OF_SERVICE', { type: 'DM', id: item.number, outOfService: false });
+                }
+            }
+            addSdiMessage(`${item.label} remis en service`);
+            logAction(`Remise en service ${item.label}`);
+            STATE.outOfService.splice(index, 1);
+            if (STATE.outOfService.length > 0) {
+                addSdiMessage('Matériels hors service:');
+                STATE.outOfService.forEach((item, index) => {
+                    addSdiMessage(`${index + 1}) ${item.label}`);
+                });
+                addSdiMessage('Tapez un autre numéro ou C pour terminer');
+                render();
+            } else {
+                addSdiMessage('Tous les matériels remis en service');
+                STATE.workflowStep = null;
+                STATE.workflowData = {};
+                render();
+            }
         }
 
         function triggerGeneralAlarm() {
             STATE.uga.alarmActive = true;
+            STATE.uga.temporizationActive = false; // Désactiver la temporisation
+            STATE.uga.temporizationRemaining = 0;
+            if (temporizationTimer) clearInterval(temporizationTimer);
+
             playGeneralAlarm(STATE.uga.alarmType);
             addSmsiMessage(`Alarme ${STATE.uga.alarmType} déclenchée`);
             logAction('Déclenchement alarme générale', STATE.uga.alarmType);
+            render(); // Re-render pour mettre à jour l'affichage
         }
 
         function forceGeneralAlarm() {
@@ -737,25 +1726,24 @@
         }
 
         function acquitProcess() {
+            // L'acquit fonctionne UNIQUEMENT pendant la temporisation
             if (STATE.uga.temporizationActive) {
                 clearInterval(temporizationTimer);
                 STATE.uga.temporizationActive = false;
-                addSmsiMessage('Processus alarme acquitté');
+                STATE.uga.temporizationRemaining = 0;
+                addSmsiMessage('Processus alarme acquitté - Alarme générale annulée');
                 logAction('Acquit processus alarme');
-            } else if (STATE.uga.alarmActive) {
-                STATE.uga.alarmActive = false;
-                stopGeneralAlarm();
-                addSmsiMessage('Alarme générale arrêtée');
-                logAction('Arrêt alarme générale');
+                render();
             }
-            render();
+            // Une fois l'alarme générale déclenchée, on ne peut plus l'arrêter via acquit
         }
 
         // System Reset functions
         function canResetSdiSystem() {
             if (STATE.accessLevel !== 2) return false;
             const allDMReset = STATE.sdi.manualAlarms.every(d => !d.triggered);
-            return allDMReset;
+            const noDaiActive = STATE.sdi.detectors.every(d => !d.triggered);
+            return allDMReset && noDaiActive;
         }
 
         function canResetSmsiSystem() {
@@ -769,22 +1757,29 @@
 
         function resetSdiSystem() {
             if (!canResetSdiSystem()) {
-                showCustomAlert('Impossible de réarmer le SDI: niveau 2 requis et tous les DM doivent être réarmés');
+                showCustomAlert('Impossible de réarmer le SDI: niveau 2 requis, tous les DM doivent être réarmés et aucun DAI ne doit être actif');
                 return;
             }
 
+            // Réarmement SDI uniquement - ne touche PAS au SMSI
             STATE.sdi.alarms = [];
             STATE.sdi.fireAlarmActive = false;
             STATE.sdi.alarmSound = false;
             STATE.sdi.detectors.forEach(d => d.triggered = false);
             STATE.sdi.manualAlarms.forEach(d => d.triggered = false);
 
-            STATE.uga.alarmActive = false;
-            STATE.uga.temporizationActive = false;
-            STATE.uga.temporizationRemaining = 0;
-
+            // Arrêt de TOUS les sons d'alarme (SDI)
             stopAlarmSound();
-            stopGeneralAlarm();
+
+            // Si une temporisation est en cours, l'arrêter
+            if (STATE.uga.temporizationActive) {
+                clearInterval(temporizationTimer);
+                STATE.uga.temporizationActive = false;
+                STATE.uga.temporizationRemaining = 0;
+            }
+
+            // NE PAS toucher à l'alarme générale et la temporisation (c'est le SMSI)
+            // L'alarme générale continue de sonner même après réarmement SDI
 
             logAction('Réarmement SDI complet');
             render();
@@ -796,10 +1791,18 @@
                 return;
             }
 
+            // Réarmement SMSI - arrête l'alarme générale et la temporisation
             STATE.smsi.messages = [];
             STATE.smsi.alarmSound = false;
             STATE.smsi.compartmentZones.forEach(z => z.commandActive = false);
             STATE.smsi.smokeZones.forEach(z => z.commandActive = false);
+
+            // Arrêter TOUS les sons d'alarme
+            STATE.uga.alarmActive = false;
+            STATE.uga.temporizationActive = false;
+            STATE.uga.temporizationRemaining = 0;
+            stopGeneralAlarm();
+            stopAlarmSound(); // Arrêter aussi le son d'alarme SDI si actif
 
             logAction('Réarmement SMSI complet');
             render();
@@ -916,6 +1919,38 @@
                 if (trainees) {
                     STATE.trainees = trainees;
                     if (STATE.currentView === 'trainee-management' || STATE.currentView === 'trainee-login') {
+                        render();
+                    }
+                }
+            });
+        }
+
+        function loadSessionLogsFromFirebase() {
+            if (!firebaseInitialized) return;
+
+            db.ref('session_logs').once('value', (snapshot) => {
+                const logs = snapshot.val();
+                if (logs) {
+                    STATE.sessionLogs = Object.values(logs);
+
+                    // Trouver le compteur le plus élevé pour l'année en cours
+                    const currentYear = new Date().getFullYear();
+                    const currentYearLogs = STATE.sessionLogs.filter(log => log.sessionYear === currentYear);
+
+                    if (currentYearLogs.length > 0) {
+                        const maxCounter = Math.max(...currentYearLogs.map(log => log.sessionCounter || 0));
+                        STATE.sessionCounter = maxCounter;
+                        STATE.sessionYear = currentYear;
+                    }
+                }
+            });
+
+            // Listen for new logs
+            db.ref('session_logs').on('child_added', (snapshot) => {
+                const log = snapshot.val();
+                if (log && !STATE.sessionLogs.find(l => l.sessionId === log.sessionId)) {
+                    STATE.sessionLogs.push(log);
+                    if (STATE.currentView === 'session-logs') {
                         render();
                     }
                 }
@@ -1156,7 +2191,38 @@
                 case 'trainee-interface':
                     app.innerHTML = renderTraineeInterface();
                     break;
+                case 'session-logs':
+                    app.innerHTML = renderSessionLogs();
+                    break;
             }
+
+            // Restaurer les flux vidéo après le rendu
+            restoreVideoStreams();
+        }
+
+        // Fonction pour restaurer les flux vidéo après chaque render()
+        function restoreVideoStreams() {
+            // Attendre un court instant que le DOM soit complètement mis à jour
+            setTimeout(() => {
+                // Restaurer le flux local (stagiaire)
+                if (STATE.localStream) {
+                    const localVideo = document.getElementById('local-video');
+                    if (localVideo && localVideo.srcObject !== STATE.localStream) {
+                        localVideo.srcObject = STATE.localStream;
+                    }
+                }
+
+                // Restaurer le flux distant (superviseur visualise le stagiaire)
+                if (STATE.remoteStream) {
+                    const remoteVideo = document.getElementById('trainee-video');
+                    if (remoteVideo && remoteVideo.srcObject !== STATE.remoteStream) {
+                        remoteVideo.srcObject = STATE.remoteStream;
+                        // Appliquer le mute et le volume configurés
+                        remoteVideo.muted = STATE.audioMuted;
+                        remoteVideo.volume = STATE.audioVolume;
+                    }
+                }
+            }, 50);
         }
 
         function renderHome() {
@@ -1359,6 +2425,9 @@
                                 <button onclick="navigate('trainee-management')" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">
                                     📋 Gestion stagiaires
                                 </button>
+                                <button onclick="navigate('session-logs')" class="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 transition">
+                                    📚 Journaux
+                                </button>
                                 <button onclick="navigate('home')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
                                     Déconnexion
                                 </button>
@@ -1379,18 +2448,139 @@
                         </div>
                         `}
 
+                        <!-- Video Panel Superviseur -->
+                        ${STATE.sessionActive ? `
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
+                            <h3 class="text-2xl font-bold mb-4">📹 Vue Stagiaire</h3>
+
+                            <div id="video-status-section">
+                                ${!STATE.remoteStream ? `
+                                    <div class="text-center py-8">
+                                        <p class="text-gray-600 dark:text-gray-400 mb-4">
+                                            En attente que le stagiaire active sa caméra...
+                                        </p>
+                                        <button onclick="supervisorConnectToVideo()" class="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition font-bold">
+                                            🔗 Se connecter à la vidéo
+                                        </button>
+                                    </div>
+                                ` : `
+                                    <div class="space-y-4">
+                                        <div class="relative bg-black rounded-lg overflow-hidden" style="height: 360px;">
+                                            <video id="trainee-video" autoplay playsinline class="w-full h-full object-cover"></video>
+                                            <div class="absolute top-2 left-2 px-2 py-1 bg-red-500 text-white text-xs rounded">
+                                                🔴 STAGIAIRE EN DIRECT
+                                            </div>
+                                            <div class="absolute bottom-2 right-2">
+                                                <button onclick="disconnectVideo()" class="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700">
+                                                    ⏹️ Déconnecter
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <p class="text-sm text-gray-600 dark:text-gray-400 text-center">
+                                            💡 Vous pouvez voir et entendre le stagiaire pour débriefing
+                                        </p>
+
+                                        <!-- Bouton Mute/Unmute Audio -->
+                                        <div class="bg-${STATE.audioMuted ? 'red' : 'green'}-50 dark:bg-${STATE.audioMuted ? 'red' : 'green'}-900 p-4 rounded-lg border-2 border-${STATE.audioMuted ? 'red' : 'green'}-500">
+                                            <button
+                                                onclick="toggleAudioMute()"
+                                                class="w-full px-6 py-3 bg-${STATE.audioMuted ? 'red' : 'green'}-500 text-white rounded-lg hover:bg-${STATE.audioMuted ? 'red' : 'green'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                            >
+                                                <span class="text-2xl">${STATE.audioMuted ? '🔇' : '🔊'}</span>
+                                                <span>${STATE.audioMuted ? 'SON COUPÉ - Cliquez pour activer' : 'SON ACTIVÉ - Cliquez pour couper'}</span>
+                                            </button>
+                                            <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
+                                                ${STATE.audioMuted ?
+                                                    '⚠️ Audio désactivé par défaut pour éviter le larsen. Utilisez un CASQUE avant d\'activer !' :
+                                                    '✅ Audio activé. Si vous entendez du larsen, COUPEZ immédiatement ou utilisez un casque.'
+                                                }
+                                            </p>
+                                        </div>
+
+                                        <!-- Contrôle de volume audio -->
+                                        ${!STATE.audioMuted ? `
+                                        <div class="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
+                                            <h4 class="font-bold mb-3 flex items-center gap-2">
+                                                🔊 Réglage du Volume
+                                            </h4>
+                                            <div class="flex items-center gap-4">
+                                                <span class="text-sm">🔇</span>
+                                                <input
+                                                    type="range"
+                                                    min="0"
+                                                    max="1"
+                                                    step="0.05"
+                                                    value="${STATE.audioVolume}"
+                                                    oninput="setAudioVolume(this.value); this.nextElementSibling.textContent = Math.round(this.value * 100) + '%'"
+                                                    class="flex-1 h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                                                    style="accent-color: #3b82f6;"
+                                                >
+                                                <span class="text-sm font-bold min-w-[50px] text-right">${Math.round(STATE.audioVolume * 100)}%</span>
+                                                <span class="text-sm">🔊</span>
+                                            </div>
+                                            <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                                                💡 Ajustez le volume pour mieux entendre le stagiaire. ⚠️ Volume faible recommandé pour éviter le larsen !
+                                            </p>
+                                        </div>
+                                        ` : ''}
+
+                                        <!-- Contrôles d'enregistrement -->
+                                        <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
+                                            <h4 class="font-bold mb-3 flex items-center gap-2">
+                                                🎬 Enregistrement pour débriefing
+                                                ${STATE.isRecording ? `<span class="px-2 py-1 bg-red-500 text-white text-xs rounded animate-pulse">⏺ REC ${getRecordingDuration()}</span>` : ''}
+                                            </h4>
+                                            <div class="flex gap-2">
+                                                ${!STATE.isRecording ? `
+                                                    <button onclick="startRecording()" class="flex-1 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition font-bold">
+                                                        ⏺ Démarrer l'enregistrement
+                                                    </button>
+                                                ` : `
+                                                    <button onclick="stopRecording()" class="flex-1 px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition font-bold">
+                                                        ⏹️ Arrêter et Télécharger
+                                                    </button>
+                                                `}
+                                            </div>
+                                            <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                                                ${STATE.isRecording ?
+                                                    '📹 Enregistrement VIDÉO + AUDIO en cours... Le fichier sera téléchargé automatiquement à l\'arrêt.' :
+                                                    '💾 L\'enregistrement capture la VIDÉO + AUDIO du stagiaire (même si le son est coupé pour vous).'
+                                                }
+                                            </p>
+                                            ${STATE.audioMuted ? `
+                                            <div class="mt-2 p-2 bg-green-100 dark:bg-green-800 rounded border border-green-500">
+                                                <p class="text-xs text-green-800 dark:text-green-200">
+                                                    ✅ <strong>Audio enregistré :</strong> Le son du stagiaire est capturé dans l'enregistrement même si vous ne l'entendez pas en direct.
+                                                </p>
+                                            </div>
+                                            ` : ''}
+                                        </div>
+                                    </div>
+                                `}
+                            </div>
+                        </div>
+                        ` : ''}
+
                         <!-- SDI Controls -->
                         <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
                             <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
 
                                 <div class="space-y-4">
-                                    <div class="grid grid-cols-2 gap-4">
+                                    <div class="grid grid-cols-3 gap-4">
                                         <div>
                                             <label class="block text-sm font-medium mb-2">État système</label>
                                             <select onchange="changeSdiState(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="service" ${STATE.sdi.systemState === 'service' ? 'selected' : ''}>En service</option>
                                                 <option value="hors-service" ${STATE.sdi.systemState === 'hors-service' ? 'selected' : ''}>Hors service</option>
                                                 <option value="hors-tension" ${STATE.sdi.systemState === 'hors-tension' ? 'selected' : ''}>Hors tension</option>
+                                            </select>
+                                        </div>
+
+                                        <div>
+                                            <label class="block text-sm font-medium mb-2">Alimentation</label>
+                                            <select onchange="changeSdiPower(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                <option value="secteur" ${STATE.sdi.powerState === 'secteur' ? 'selected' : ''}>Secteur</option>
+                                                <option value="batterie" ${STATE.sdi.powerState === 'batterie' ? 'selected' : ''}>Batterie</option>
                                             </select>
                                         </div>
 
@@ -1413,7 +2603,8 @@
                                             <label class="block text-sm font-medium mb-2">Type alarme</label>
                                             <select onchange="setAlarmType(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="generale" ${STATE.uga.alarmType === 'generale' ? 'selected' : ''}>Générale</option>
-                                                <option value="generale-restreinte" ${STATE.uga.alarmType === 'generale-restreinte' ? 'selected' : ''}>Générale restreinte</option>
+                                                <option value="generale-selective" ${STATE.uga.alarmType === 'generale-selective' ? 'selected' : ''}>Générale sélective</option>
+                                                <option value="generale-message" ${STATE.uga.alarmType === 'generale-message' ? 'selected' : ''}>Générale avec message</option>
                                             </select>
                                         </div>
                                     </div>
@@ -1424,8 +2615,8 @@
                                             <h4 class="font-bold mb-2">🔍 DAI</h4>
                                             ${STATE.sdi.detectors.map(d => `
                                                 <div class="flex items-center gap-2 mb-2">
-                                                    <button onclick="${d.state === 'service' ? `toggleDetector('DAI', ${d.id})` : ''}" class="w-12 h-12 ${d.triggered ? 'bg-red-500' : 'bg-green-500'} rounded-lg border-3 border-black ${d.state === 'hors-service' ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
-                                                    <span class="text-sm font-mono w-14 flex-shrink-0 font-bold">DAI${String(d.id).padStart(2, '0')}</span>
+                                                    <button onclick="${(d.state === 'service' && !d.outOfService) ? `toggleDetector('DAI', ${d.id})` : ''}" class="w-10 h-10 ${(d.outOfService || d.state === 'hors-service') ? 'bg-orange-500' : (d.triggered ? 'bg-red-500' : 'bg-green-500')} rounded-lg border-3 border-black ${(d.state === 'hors-service' || d.outOfService) ? 'cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
+                                                    <span class="text-base font-mono w-16 flex-shrink-0 font-bold ${(d.outOfService || d.state === 'hors-service') ? 'text-orange-600 dark:text-orange-400' : ''}">DAI${String(d.id).padStart(2, '0')}</span>
                                                     <select onchange="changeDetectorZone('DAI', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                         <option value="ZC1" ${d.zone === 'ZC1' ? 'selected' : ''}>ZC1</option>
                                                         <option value="ZC2" ${d.zone === 'ZC2' ? 'selected' : ''}>ZC2</option>
@@ -1433,8 +2624,8 @@
                                                     </select>
                                                     <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DAI', ${d.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                     <select onchange="changeDetectorState('DAI', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                                                        <option value="service" ${d.state === 'service' ? 'selected' : ''}>OK</option>
-                                                        <option value="hors-service" ${d.state === 'hors-service' ? 'selected' : ''}>HS</option>
+                                                        <option value="service" ${(d.state === 'service' && !d.outOfService) ? 'selected' : ''}>OK</option>
+                                                        <option value="hors-service" ${(d.state === 'hors-service' || d.outOfService) ? 'selected' : ''}>HS</option>
                                                     </select>
                                                 </div>
                                             `).join('')}
@@ -1444,8 +2635,8 @@
                                             <h4 class="font-bold mb-2">🚨 DM</h4>
                                             ${STATE.sdi.manualAlarms.map(d => `
                                                 <div class="flex items-center gap-2 mb-2">
-                                                    <button onclick="${d.state === 'service' ? `toggleDetector('DM', ${d.id})` : ''}" class="w-12 h-12 ${d.triggered ? 'bg-red-500' : 'bg-green-500'} rounded-lg border-3 border-black ${d.state === 'hors-service' ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
-                                                    <span class="text-sm font-mono w-12 flex-shrink-0 font-bold">DM${String(d.id).padStart(2, '0')}</span>
+                                                    <button onclick="${(d.state === 'service' && !d.outOfService) ? `toggleDetector('DM', ${d.id})` : ''}" class="w-10 h-10 ${(d.outOfService || d.state === 'hors-service') ? 'bg-orange-500' : (d.triggered ? 'bg-red-500' : 'bg-green-500')} rounded-lg border-3 border-black ${(d.state === 'hors-service' || d.outOfService) ? 'cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
+                                                    <span class="text-base font-mono w-14 flex-shrink-0 font-bold ${(d.outOfService || d.state === 'hors-service') ? 'text-orange-600 dark:text-orange-400' : ''}">DM${String(d.id).padStart(2, '0')}</span>
                                                     <select onchange="changeDetectorZone('DM', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                         <option value="ZC1" ${d.zone === 'ZC1' ? 'selected' : ''}>ZC1</option>
                                                         <option value="ZC2" ${d.zone === 'ZC2' ? 'selected' : ''}>ZC2</option>
@@ -1453,8 +2644,8 @@
                                                     </select>
                                                     <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DM', ${d.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                     <select onchange="changeDetectorState('DM', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                                                        <option value="service" ${d.state === 'service' ? 'selected' : ''}>OK</option>
-                                                        <option value="hors-service" ${d.state === 'hors-service' ? 'selected' : ''}>HS</option>
+                                                        <option value="service" ${(d.state === 'service' && !d.outOfService) ? 'selected' : ''}>OK</option>
+                                                        <option value="hors-service" ${(d.state === 'hors-service' || d.outOfService) ? 'selected' : ''}>HS</option>
                                                     </select>
                                                     <button onclick="resetDM(${d.id})" class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 flex-shrink-0 font-bold">↻</button>
                                                 </div>
@@ -1469,13 +2660,21 @@
                             <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
 
                                 <div class="space-y-4">
-                                    <div class="grid grid-cols-2 gap-4">
+                                    <div class="grid grid-cols-3 gap-4">
                                         <div>
                                             <label class="block text-sm font-medium mb-2">État système</label>
                                             <select onchange="changeSmsiState(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="service" ${STATE.smsi.systemState === 'service' ? 'selected' : ''}>En service</option>
                                                 <option value="hors-service" ${STATE.smsi.systemState === 'hors-service' ? 'selected' : ''}>Hors service</option>
                                                 <option value="hors-tension" ${STATE.smsi.systemState === 'hors-tension' ? 'selected' : ''}>Hors tension</option>
+                                            </select>
+                                        </div>
+
+                                        <div>
+                                            <label class="block text-sm font-medium mb-2">Alimentation</label>
+                                            <select onchange="changeSmsiPower(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                <option value="secteur" ${STATE.smsi.powerState === 'secteur' ? 'selected' : ''}>Secteur</option>
+                                                <option value="batterie" ${STATE.smsi.powerState === 'batterie' ? 'selected' : ''}>Batterie</option>
                                             </select>
                                         </div>
 
@@ -1495,8 +2694,8 @@
                                             ${STATE.smsi.compartmentZones.map(z => `
                                                 <div class="flex flex-col gap-1 mb-2">
                                                     <div class="flex items-center gap-1">
-                                                        <span class="text-xs font-mono font-bold">${z.zone}</span>
-                                                        <select onchange="changeZoneState('compartment', ${z.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                        <span class="text-sm font-mono font-bold">${z.zone}</span>
+                                                        <select onchange="changeZoneState('compartment', ${z.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                             <option value="attente" ${z.state === 'attente' ? 'selected' : ''}>Attente</option>
                                                             <option value="defaut-attente" ${z.state === 'defaut-attente' ? 'selected' : ''}>Défaut position attente</option>
                                                             <option value="securite" ${z.state === 'securite' ? 'selected' : ''}>En sécurité</option>
@@ -1514,8 +2713,8 @@
                                             ${STATE.smsi.smokeZones.map(z => `
                                                 <div class="flex flex-col gap-1 mb-2">
                                                     <div class="flex items-center gap-1">
-                                                        <span class="text-xs font-mono font-bold">${z.zone}</span>
-                                                        <select onchange="changeZoneState('smoke', ${z.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                        <span class="text-sm font-mono font-bold">${z.zone}</span>
+                                                        <select onchange="changeZoneState('smoke', ${z.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                             <option value="attente" ${z.state === 'attente' ? 'selected' : ''}>Attente</option>
                                                             <option value="defaut-attente" ${z.state === 'defaut-attente' ? 'selected' : ''}>Défaut position attente</option>
                                                             <option value="securite" ${z.state === 'securite' ? 'selected' : ''}>En sécurité</option>
@@ -1533,8 +2732,8 @@
                                             ${STATE.smsi.relayBoxes.map(r => `
                                                 <div class="flex flex-col gap-1 mb-2">
                                                     <div class="flex items-center gap-1">
-                                                        <span class="text-xs font-mono font-bold">CR${r.id}</span>
-                                                        <select onchange="changeZoneState('relay', ${r.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                        <span class="text-sm font-mono font-bold">CR${r.id}</span>
+                                                        <select onchange="changeZoneState('relay', ${r.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                             <option value="attente" ${r.state === 'attente' ? 'selected' : ''}>Attente</option>
                                                             <option value="defaut-attente" ${r.state === 'defaut-attente' ? 'selected' : ''}>Défaut position attente</option>
                                                             <option value="securite" ${r.state === 'securite' ? 'selected' : ''}>En sécurité</option>
@@ -1582,6 +2781,22 @@
                                 <p class="text-xs text-gray-600 dark:text-gray-400">
                                     ${STATE.currentUser?.prenom} ${STATE.currentUser?.nom} - SSIAP ${STATE.currentUser?.niveau}
                                 </p>
+                                ${STATE.sessionActive && STATE.sessionNumber ? `
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <span class="px-2 py-1 bg-blue-500 text-white rounded text-xs font-bold">
+                                            📋 Session ${STATE.sessionNumber}
+                                        </span>
+                                        <span class="px-2 py-1 ${STATE.sessionActive ? 'bg-green-500' : 'bg-red-500'} text-white rounded text-xs font-bold">
+                                            ${STATE.sessionActive ? '✓ OUVERTE' : '✗ FERMÉE'}
+                                        </span>
+                                    </div>
+                                ` : STATE.sessionId ? `
+                                    <div class="mt-1">
+                                        <span class="px-2 py-1 bg-yellow-500 text-white rounded text-xs font-bold">
+                                            ⏳ En attente de session...
+                                        </span>
+                                    </div>
+                                ` : ''}
                             </div>
                             <button onclick="navigate('home')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition text-sm">
                                 Déconnexion
@@ -1593,28 +2808,41 @@
                             <div class="ssi-panel">
                                 <h3 class="text-xl font-bold mb-3 text-white">🔥 SDI</h3>
 
+                                <!-- Status Indicators - 3 voyants -->
+                                <div class="grid grid-cols-3 gap-2 mb-2">
+                                    <div class="bg-gray-800 p-1.5 rounded flex items-center justify-between">
+                                        <div class="text-white text-xs">État mat.</div>
+                                        <span class="led-light ${STATE.sdi.systemState === 'service' ? 'led-green' : 'led-off'}"></span>
+                                    </div>
+                                    <div class="bg-gray-800 p-1.5 rounded flex items-center justify-between">
+                                        <div class="text-white text-xs">Alim. sect.</div>
+                                        <span class="led-light ${STATE.sdi.powerState === 'secteur' ? 'led-green' : 'led-off'}"></span>
+                                    </div>
+                                    <div class="bg-gray-800 p-1.5 rounded flex items-center justify-between">
+                                        <div class="text-white text-xs">Batterie</div>
+                                        <span class="led-light ${STATE.sdi.batteryState === 'service' ? 'led-green' : 'led-off'}"></span>
+                                    </div>
+                                </div>
+
                                 <!-- ECS Screen -->
-                                <div class="mb-3">
-                                    <div class="text-white text-xs font-bold mb-1">📟 ECS</div>
-                                    <div class="ssi-screen max-h-32 overflow-y-auto text-xs">
+                                <div class="mb-2">
+                                    <div class="text-white text-xs font-bold mb-1">
+                                        <span>📟 ECS</span>
+                                    </div>
+                                    <div id="sdi-screen" class="ssi-screen max-h-48 overflow-y-hidden overflow-x-hidden text-xs scroll-smooth">
                                         ${STATE.sdi.alarms.length === 0 ?
                                             '<div class="text-center">SYSTÈME EN VEILLE</div>' :
-                                            STATE.sdi.alarms.slice(-5).map(alarm => `
+                                            STATE.sdi.alarms.map(alarm => `
                                                 <div class="mb-1">${alarm.text}</div>
                                             `).join('')
                                         }
                                     </div>
-                                </div>
-
-                                <!-- Status Indicators -->
-                                <div class="grid grid-cols-2 gap-2 mb-3">
-                                    <div class="bg-gray-800 p-2 rounded">
-                                        <div class="text-white text-xs mb-1">État matériel</div>
-                                        <span class="led-light ${STATE.sdi.systemState === 'service' ? 'led-green' : 'led-off'}"></span>
-                                    </div>
-                                    <div class="bg-gray-800 p-2 rounded">
-                                        <div class="text-white text-xs mb-1">Batterie</div>
-                                        <span class="led-light ${STATE.sdi.batteryState === 'service' ? 'led-green' : 'led-off'}"></span>
+                                    <!-- Navigation - Nord Sud Est Ouest -->
+                                    <div class="flex justify-center gap-1 mt-1">
+                                        <button onclick="scrollScreen('sdi-screen', 'first')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Ouest">⬅️</button>
+                                        <button onclick="scrollScreen('sdi-screen', 'up')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Nord">⬆️</button>
+                                        <button onclick="scrollScreen('sdi-screen', 'down')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Sud">⬇️</button>
+                                        <button onclick="scrollScreen('sdi-screen', 'last')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Est">➡️</button>
                                     </div>
                                 </div>
 
@@ -1633,17 +2861,44 @@
                                     </div>
                                 </div>
 
-                                <!-- Access Level & Reset on same line -->
-                                <div class="flex gap-2 mb-2">
-                                    <button onclick="toggleAccessLevel('sdi')" class="px-3 py-1 ${STATE.accessLevel === 1 ? 'bg-green-600' : 'bg-yellow-600'} text-white rounded text-xs hover:opacity-90">
-                                        Niv.${STATE.accessLevel}
+                                <!-- 4 Boutons de commande sur une ligne -->
+                                <div class="grid grid-cols-4 gap-1 mb-2">
+                                    <button onclick="toggleAccessLevel('sdi')" class="px-2 py-2 ${STATE.accessLevel === 1 ? 'bg-green-600' : 'bg-yellow-600'} text-white rounded text-xs hover:opacity-90 font-bold">
+                                        🔑 Niv.${STATE.accessLevel}
                                     </button>
-                                    <div class="key-switch ${STATE.accessLevel === 2 ? 'active' : ''}" onclick="toggleAccessLevel('sdi')">
-                                        🔑
+                                    <button onclick="traineeResetSdiSystem()" class="px-2 py-2 ${canResetSdiSystem() ? 'bg-green-600' : 'bg-gray-600 opacity-50'} text-white rounded text-xs font-bold">
+                                        🔄 RÉARM
+                                    </button>
+                                    <button onclick="startOutOfServiceWorkflow()" class="px-2 py-2 ${STATE.accessLevel === 2 ? 'bg-orange-600 hover:bg-orange-700' : 'bg-gray-600 opacity-50'} text-white rounded text-xs font-bold" ${STATE.accessLevel !== 2 ? 'disabled' : ''}>
+                                        ⚠️ M.H.S.
+                                    </button>
+                                    <button onclick="startBackInServiceWorkflow()" class="px-2 py-2 ${STATE.accessLevel === 2 ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 opacity-50'} text-white rounded text-xs font-bold" ${STATE.accessLevel !== 2 ? 'disabled' : ''}>
+                                        ✅ R.S.
+                                    </button>
+                                </div>
+
+                                <!-- Pavé numérique en dessous -->
+                                <div class="bg-gray-800 p-1.5 rounded mb-2">
+                                    <div class="text-white text-xs font-bold mb-1">Pavé numérique</div>
+                                    <div class="bg-black text-green-400 font-mono p-1 rounded mb-1 text-center text-xs min-h-[20px]">
+                                        ${STATE.keypadInput || '_'}
                                     </div>
-                                    <button onclick="traineeResetSdiSystem()" class="flex-1 px-3 py-1 ${canResetSdiSystem() ? 'bg-green-600' : 'bg-gray-600 opacity-50'} text-white rounded text-xs">
-                                        🔄 RÉARMEMENT SDI
-                                    </button>
+                                    <div class="grid grid-cols-3 gap-0.5">
+                                        ${[1,2,3,4,5,6,7,8,9].map(n => `
+                                            <button onclick="keypadPress('${n}')" class="bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded text-xs font-bold">
+                                                ${n}
+                                            </button>
+                                        `).join('')}
+                                        <button onclick="keypadPress('C')" class="bg-red-700 hover:bg-red-600 text-white py-1.5 rounded text-xs font-bold">
+                                            C
+                                        </button>
+                                        <button onclick="keypadPress('0')" class="bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded text-xs font-bold">
+                                            0
+                                        </button>
+                                        <button onclick="keypadValidate()" class="bg-green-700 hover:bg-green-600 text-white py-1.5 rounded text-xs font-bold">
+                                            ✓
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
@@ -1651,28 +2906,41 @@
                             <div class="ssi-panel">
                                 <h3 class="text-xl font-bold mb-3 text-white">🛡️ SMSI</h3>
 
+                                <!-- Status Indicators - 3 voyants -->
+                                <div class="grid grid-cols-3 gap-2 mb-2">
+                                    <div class="bg-gray-800 p-1.5 rounded flex items-center justify-between">
+                                        <div class="text-white text-xs">État mat.</div>
+                                        <span class="led-light ${STATE.smsi.systemState === 'service' ? 'led-green' : 'led-off'}"></span>
+                                    </div>
+                                    <div class="bg-gray-800 p-1.5 rounded flex items-center justify-between">
+                                        <div class="text-white text-xs">Alim. sect.</div>
+                                        <span class="led-light ${STATE.smsi.powerState === 'secteur' ? 'led-green' : 'led-off'}"></span>
+                                    </div>
+                                    <div class="bg-gray-800 p-1.5 rounded flex items-center justify-between">
+                                        <div class="text-white text-xs">Batterie</div>
+                                        <span class="led-light ${STATE.smsi.batteryState === 'service' ? 'led-green' : 'led-off'}"></span>
+                                    </div>
+                                </div>
+
                                 <!-- SMSI Screen -->
-                                <div class="mb-3">
-                                    <div class="text-white text-xs font-bold mb-1">📟 Remontées SMSI</div>
-                                    <div class="ssi-screen max-h-32 overflow-y-auto text-xs">
+                                <div class="mb-2">
+                                    <div class="text-white text-xs font-bold mb-1">
+                                        <span>📟 Remontées SMSI</span>
+                                    </div>
+                                    <div id="smsi-screen" class="ssi-screen max-h-48 overflow-y-hidden overflow-x-hidden text-xs scroll-smooth">
                                         ${STATE.smsi.messages.length === 0 ?
                                             '<div class="text-center">SYSTÈME EN VEILLE</div>' :
-                                            STATE.smsi.messages.slice(-5).map(msg => `
+                                            STATE.smsi.messages.map(msg => `
                                                 <div class="mb-1">${msg.text}</div>
                                             `).join('')
                                         }
                                     </div>
-                                </div>
-
-                                <!-- Status Indicators -->
-                                <div class="grid grid-cols-2 gap-2 mb-3">
-                                    <div class="bg-gray-800 p-2 rounded">
-                                        <div class="text-white text-xs mb-1">État matériel</div>
-                                        <span class="led-light ${STATE.smsi.systemState === 'service' ? 'led-green' : 'led-off'}"></span>
-                                    </div>
-                                    <div class="bg-gray-800 p-2 rounded">
-                                        <div class="text-white text-xs mb-1">Batterie</div>
-                                        <span class="led-light ${STATE.smsi.batteryState === 'service' ? 'led-green' : 'led-off'}"></span>
+                                    <!-- Navigation - Nord Sud Est Ouest -->
+                                    <div class="flex justify-center gap-1 mt-1">
+                                        <button onclick="scrollScreen('smsi-screen', 'first')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Ouest">⬅️</button>
+                                        <button onclick="scrollScreen('smsi-screen', 'up')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Nord">⬆️</button>
+                                        <button onclick="scrollScreen('smsi-screen', 'down')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Sud">⬇️</button>
+                                        <button onclick="scrollScreen('smsi-screen', 'last')" class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs font-bold" title="Est">➡️</button>
                                     </div>
                                 </div>
 
@@ -1681,23 +2949,23 @@
                                     <div class="text-white font-bold mb-2 text-xs">🔔 UGA</div>
 
                                     ${STATE.uga.temporizationActive ? `
-                                        <div class="bg-yellow-600 text-white p-2 rounded mb-2 text-center font-bold text-xs">
+                                        <div class="bg-yellow-600 text-white p-2 rounded mb-2 text-center font-bold text-xs temporization-display">
                                             ⏱️ ${Math.floor(STATE.uga.temporizationRemaining / 60)}:${String(STATE.uga.temporizationRemaining % 60).padStart(2, '0')}
                                         </div>
-                                    ` : ''}
+                                    ` : '<div class="temporization-display"></div>'}
 
                                     <div class="grid grid-cols-2 gap-1">
                                         <button id="forceAlarmBtn" onmousedown="startForceAlarm()" onmouseup="cancelForceAlarm()" ontouchstart="startForceAlarm()" ontouchend="cancelForceAlarm()" class="px-2 py-2 bg-red-600 text-white rounded text-xs hover:bg-red-700">
                                             🚨 FORCÉ (3s)
                                         </button>
-                                        <button onclick="traineeAcquitProcess()" class="px-2 py-2 bg-yellow-600 text-white rounded text-xs hover:bg-yellow-700">
-                                            ✋ ACQUIT
+                                        <button onclick="traineeAcquitProcess()" class="px-2 py-2 ${STATE.uga.temporizationActive ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-gray-500 opacity-50 cursor-not-allowed'} text-white rounded text-xs" ${STATE.uga.alarmActive ? 'disabled' : ''}>
+                                            ✋ ACQUIT ${STATE.uga.temporizationActive ? '' : '(Inactif)'}
                                         </button>
                                     </div>
 
                                     ${STATE.uga.alarmActive ? `
                                         <div class="mt-2 bg-red-600 text-white p-2 rounded text-center font-bold text-xs blink">
-                                            🚨 ALARME ${STATE.uga.alarmType === 'generale' ? 'GÉNÉRALE' : 'RESTREINTE'}
+                                            🚨 ALARME ${STATE.uga.alarmType === 'generale' ? 'GÉNÉRALE' : (STATE.uga.alarmType === 'generale-selective' ? 'SÉLECTIVE' : 'AVEC MESSAGE')}
                                         </div>
                                     ` : ''}
                                 </div>
@@ -1788,6 +3056,47 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Video Panel Stagiaire - MASQUÉ (la caméra fonctionne en arrière-plan automatiquement) -->
+                        <!--
+                        <div class="mt-4 bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg">
+                            <h3 class="text-lg font-bold mb-3">📹 Partage Vidéo / Audio</h3>
+
+                            ${!STATE.localStream ? `
+                                <div class="text-center py-8">
+                                    <p class="text-gray-600 dark:text-gray-400 mb-4">
+                                        Activez votre caméra et micro pour partager avec le superviseur
+                                    </p>
+                                    <button onclick="startVideo()" class="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition font-bold">
+                                        📹 Activer Caméra et Micro
+                                    </button>
+                                </div>
+                            ` : `
+                                <div class="space-y-4">
+                                    <div class="relative bg-black rounded-lg overflow-hidden" style="height: 240px;">
+                                        <video id="local-video" autoplay muted playsinline class="w-full h-full object-cover"></video>
+                                        <div class="absolute top-2 left-2 px-2 py-1 bg-green-500 text-white text-xs rounded">
+                                            🔴 LIVE
+                                        </div>
+                                        <div class="absolute bottom-2 left-2 right-2 flex justify-center gap-2">
+                                            <button onclick="toggleVideo()" class="px-3 py-2 ${STATE.videoEnabled ? 'bg-blue-500' : 'bg-red-500'} text-white rounded hover:opacity-90">
+                                                ${STATE.videoEnabled ? '📹' : '📹❌'} ${STATE.videoEnabled ? 'ON' : 'OFF'}
+                                            </button>
+                                            <button onclick="toggleAudio()" class="px-3 py-2 ${STATE.audioEnabled ? 'bg-blue-500' : 'bg-red-500'} text-white rounded hover:opacity-90">
+                                                ${STATE.audioEnabled ? '🎤' : '🎤❌'} ${STATE.audioEnabled ? 'ON' : 'OFF'}
+                                            </button>
+                                            <button onclick="stopVideo()" class="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700">
+                                                ⏹️ Arrêter
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <p class="text-sm text-gray-600 dark:text-gray-400 text-center">
+                                        Votre vidéo est partagée avec le superviseur
+                                    </p>
+                                </div>
+                            `}
+                        </div>
+                        -->
                     </div>
                 </div>
             `;
@@ -1892,6 +3201,18 @@
             sendMessage('SDI_BATTERY_CHANGE', { state });
         }
 
+        function changeSdiPower(state) {
+            if (!checkSessionBeforeAction()) return;
+            STATE.sdi.powerState = state;
+            sendMessage('SDI_POWER_CHANGE', { state });
+        }
+
+        function changeSmsiPower(state) {
+            if (!checkSessionBeforeAction()) return;
+            STATE.smsi.powerState = state;
+            sendMessage('SMSI_POWER_CHANGE', { state });
+        }
+
         function setTemporization(minutes) {
             if (!checkSessionBeforeAction()) return;
             STATE.uga.temporization = parseInt(minutes);
@@ -1912,10 +3233,12 @@
             if (detector.triggered) {
                 resetDetector(type, id);
                 sendMessage('RESET_DETECTOR', { type, id });
+                logAction(`Réarmement ${type}`, detector.address, 'supervisor');
             } else {
                 // Côté superviseur: ne pas jouer le son (playSound = false)
                 triggerDetector(type, id, false);
                 sendMessage('TRIGGER_DETECTOR', { type, id });
+                logAction(`Déclenchement ${type}`, detector.address, 'supervisor');
             }
 
             render();
@@ -1931,6 +3254,8 @@
             const detectorArray = type === 'DAI' ? STATE.sdi.detectors : STATE.sdi.manualAlarms;
             const detector = detectorArray.find(d => d.id === id);
             detector.state = state;
+            // Synchroniser avec Firebase
+            sendMessage('CHANGE_DETECTOR_STATE', { type, id, state });
             render();
         }
 
@@ -1939,6 +3264,303 @@
             const detector = detectorArray.find(d => d.id === id);
             detector.zone = zone;
             render();
+        }
+
+        function renderSessionLogs() {
+            // Trier les journaux par date (plus récent en premier)
+            const sortedLogs = [...STATE.sessionLogs].sort((a, b) =>
+                new Date(b.endTime) - new Date(a.endTime)
+            );
+
+            // Filtrer selon la recherche
+            const query = STATE.searchQuery.toLowerCase();
+            // N'afficher les journaux que si une recherche est effectuée
+            const filteredLogs = query ? sortedLogs.filter(log => {
+                const dateStr = new Date(log.startTime).toLocaleDateString('fr-FR');
+                const trainee = (log.trainee || '').toLowerCase();
+                const sessionNum = log.sessionNumber.toString();
+                return dateStr.includes(query) || trainee.includes(query) || sessionNum.includes(query);
+            }) : [];
+
+            return `
+                <div class="min-h-screen p-4 bg-gray-100 dark:bg-gray-900">
+                    <div class="max-w-7xl mx-auto">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-3xl font-bold">📚 Historique des Journaux de Session</h2>
+                            <button onclick="navigate('supervisor-interface')" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">
+                                ← Retour
+                            </button>
+                        </div>
+
+                        <!-- Barre de recherche -->
+                        <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg mb-6">
+                            <div class="relative">
+                                <input
+                                    type="text"
+                                    id="search-input"
+                                    value="${STATE.searchQuery}"
+                                    oninput="updateSearchQuery(this.value)"
+                                    placeholder="🔍 Rechercher par date, nom du stagiaire ou numéro de session..."
+                                    class="w-full px-4 py-3 text-base border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                                    list="search-suggestions"
+                                />
+                                <datalist id="search-suggestions">
+                                    ${sortedLogs.map(log => `
+                                        <option value="${log.sessionNumber}">Session ${log.sessionNumber}</option>
+                                        <option value="${log.trainee || ''}"></option>
+                                        <option value="${new Date(log.startTime).toLocaleDateString('fr-FR')}"></option>
+                                    `).join('')}
+                                </datalist>
+                                ${STATE.searchQuery ? `
+                                    <button onclick="clearSearch()" class="absolute right-3 top-3 text-gray-500 hover:text-gray-700">
+                                        ✕
+                                    </button>
+                                ` : ''}
+                            </div>
+                            ${STATE.searchQuery && filteredLogs.length > 0 ? `
+                                <div class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                                    ${filteredLogs.length} résultat(s) trouvé(s)
+                                </div>
+                            ` : ''}
+                        </div>
+
+                        ${filteredLogs.length === 0 ? `
+                            <div class="bg-white dark:bg-gray-800 p-12 rounded-xl shadow-lg text-center">
+                                <p class="text-gray-500 dark:text-gray-400 text-lg">
+                                    ${STATE.searchQuery ? 'Aucun résultat trouvé pour cette recherche.' : '🔍 Utilisez la barre de recherche pour afficher les journaux'}
+                                </p>
+                            </div>
+                        ` : `
+                            <div class="grid gap-6">
+                                ${filteredLogs.map(log => `
+                                    <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                        <div class="flex justify-between items-start mb-4">
+                                            <div>
+                                                <h3 class="text-2xl font-bold text-primary">Session ${log.sessionNumber}</h3>
+                                                <div class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                                                    <span>👤 ${log.trainee || 'Inconnu'}</span>
+                                                    <span class="mx-2">•</span>
+                                                    <span>👨‍🏫 ${log.supervisor || 'Superviseur'}</span>
+                                                </div>
+                                            </div>
+                                            <div class="text-right text-sm">
+                                                <div class="text-gray-600 dark:text-gray-400">
+                                                    📅 ${new Date(log.startTime).toLocaleDateString('fr-FR')}
+                                                </div>
+                                                <div class="text-gray-600 dark:text-gray-400">
+                                                    🕐 ${new Date(log.startTime).toLocaleTimeString('fr-FR')} - ${new Date(log.endTime).toLocaleTimeString('fr-FR')}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+                                            <h4 class="font-bold mb-3">📋 Actions (${log.actions.length})</h4>
+                                            <div class="ssi-screen max-h-96 overflow-y-auto">
+                                                ${log.actions.slice(-50).reverse().map(action => `
+                                                    <div class="mb-2 pb-2 border-b border-green-900">
+                                                        <div class="text-xs opacity-75">${new Date(action.timestamp).toLocaleString('fr-FR')}</div>
+                                                        <div>${action.trainee}: <span class="text-yellow-400">${action.action}</span></div>
+                                                        ${action.details ? `<div class="text-sm opacity-75">${action.details}</div>` : ''}
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                        </div>
+
+                                        <div class="mt-4 flex justify-end gap-2">
+                                            <button onclick="printSessionLog('${log.sessionId}')" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition text-sm">
+                                                🖨️ Imprimer PDF
+                                            </button>
+                                            <button onclick="deleteSessionLog('${log.sessionId}')" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition text-sm">
+                                                🗑️ Supprimer
+                                            </button>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `}
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateSearchQuery(value) {
+            STATE.searchQuery = value;
+            // Ne pas faire de render complet, juste mettre à jour les résultats
+            updateSearchResults();
+        }
+
+        function updateSearchResults() {
+            // Filtrer et afficher les résultats sans re-render complet
+            const query = STATE.searchQuery.toLowerCase();
+            const sortedLogs = [...STATE.sessionLogs].sort((a, b) => new Date(b.endTime) - new Date(a.endTime));
+            const filteredLogs = query ? sortedLogs.filter(log => {
+                const dateStr = new Date(log.startTime).toLocaleDateString('fr-FR');
+                const trainee = (log.trainee || '').toLowerCase();
+                const sessionNum = log.sessionNumber.toString();
+                return dateStr.includes(query) || trainee.includes(query) || sessionNum.includes(query);
+            }) : sortedLogs;
+
+            // Mettre à jour uniquement la section des résultats
+            const resultsContainer = document.querySelector('.grid.gap-6');
+            if (resultsContainer) {
+                if (filteredLogs.length === 0) {
+                    resultsContainer.innerHTML = '<div class="bg-white dark:bg-gray-800 p-12 rounded-xl shadow-lg text-center"><p class="text-gray-500 dark:text-gray-400 text-lg">Aucun résultat trouvé.</p></div>';
+                } else {
+                    resultsContainer.innerHTML = filteredLogs.map(log => `
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                            <div class="flex justify-between items-start mb-4">
+                                <div>
+                                    <h3 class="text-2xl font-bold text-primary">Session ${log.sessionNumber}</h3>
+                                    <div class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                                        <span>👤 ${log.trainee || 'Inconnu'}</span>
+                                        <span class="mx-2">•</span>
+                                        <span>👨‍🏫 ${log.supervisor || 'Superviseur'}</span>
+                                    </div>
+                                </div>
+                                <div class="text-right text-sm">
+                                    <div class="text-gray-600 dark:text-gray-400">
+                                        📅 ${new Date(log.startTime).toLocaleDateString('fr-FR')}
+                                    </div>
+                                    <div class="text-gray-600 dark:text-gray-400">
+                                        🕐 ${new Date(log.startTime).toLocaleTimeString('fr-FR')} - ${new Date(log.endTime).toLocaleTimeString('fr-FR')}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+                                <h4 class="font-bold mb-3">📋 Actions (${log.actions.length})</h4>
+                                <div class="ssi-screen max-h-96 overflow-y-auto">
+                                    ${log.actions.slice(-50).reverse().map(action => `
+                                        <div class="mb-2 pb-2 border-b border-green-900">
+                                            <div class="text-xs opacity-75">${new Date(action.timestamp).toLocaleString('fr-FR')}</div>
+                                            <div>${action.trainee}: <span class="text-yellow-400">${action.action}</span></div>
+                                            ${action.details ? `<div class="text-sm opacity-75">${action.details}</div>` : ''}
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                            <div class="mt-4 flex justify-end gap-2">
+                                <button onclick="printSessionLog('${log.sessionId}')" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition text-sm">
+                                    🖨️ Imprimer PDF
+                                </button>
+                                <button onclick="deleteSessionLog('${log.sessionId}')" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition text-sm">
+                                    🗑️ Supprimer
+                                </button>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            }
+
+            // Mettre à jour le compteur de résultats
+            const counterElement = document.querySelector('.mt-2.text-sm');
+            if (counterElement && STATE.searchQuery && filteredLogs.length > 0) {
+                counterElement.textContent = `${filteredLogs.length} résultat(s) trouvé(s)`;
+            }
+        }
+
+        function clearSearch() {
+            STATE.searchQuery = '';
+            render();
+        }
+
+        function printSessionLog(sessionId) {
+            const log = STATE.sessionLogs.find(l => l.sessionId === sessionId);
+            if (!log) return;
+
+            // Séparer les actions par acteur (superviseur vs stagiaire)
+            const supervisorActions = log.actions.filter(a => a.actor === 'supervisor');
+            const traineeActions = log.actions.filter(a => a.actor === 'trainee' || !a.actor); // !a.actor pour rétro-compatibilité
+
+            // Construire le HTML en deux colonnes
+            const maxLength = Math.max(supervisorActions.length, traineeActions.length);
+            let rowsHtml = '';
+
+            for (let i = 0; i < maxLength; i++) {
+                const supervisorAction = supervisorActions[i];
+                const traineeAction = traineeActions[i];
+
+                const supervisorCell = supervisorAction ?
+                    '<div class="action-cell">' +
+                    '<div class="timestamp">' + new Date(supervisorAction.timestamp).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit', second:'2-digit'}) + '</div>' +
+                    '<div class="action-content">' + supervisorAction.action + '</div>' +
+                    (supervisorAction.details ? '<div class="details">' + supervisorAction.details + '</div>' : '') +
+                    '</div>' : '<div class="action-cell empty"></div>';
+
+                const traineeCell = traineeAction ?
+                    '<div class="action-cell">' +
+                    '<div class="timestamp">' + new Date(traineeAction.timestamp).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit', second:'2-digit'}) + '</div>' +
+                    '<div class="action-content">' + traineeAction.action + '</div>' +
+                    (traineeAction.details ? '<div class="details">' + traineeAction.details + '</div>' : '') +
+                    '</div>' : '<div class="action-cell empty"></div>';
+
+                rowsHtml += '<tr>' +
+                    '<td class="scenario-col">' + supervisorCell + '</td>' +
+                    '<td class="trainee-col">' + traineeCell + '</td>' +
+                    '</tr>';
+            }
+
+            // Créer une fenêtre d'impression avec le contenu formaté
+            const printWindow = window.open('', '', 'width=1000,height=800');
+            const html = '<!DOCTYPE html>' +
+                '<html><head>' +
+                '<title>Journal Session ' + log.sessionNumber + '</title>' +
+                '<style>' +
+                'body { font-family: Arial, sans-serif; padding: 20px; font-size: 12px; }' +
+                'h1 { color: #333; border-bottom: 2px solid #5D5CDE; padding-bottom: 10px; font-size: 18px; }' +
+                'h2 { color: #444; font-size: 14px; margin-top: 20px; }' +
+                '.meta { background: #f5f5f5; padding: 15px; margin: 20px 0; border-radius: 5px; }' +
+                '.meta-item { margin: 5px 0; }' +
+                'table { width: 100%; border-collapse: collapse; margin-top: 10px; }' +
+                'th { background: #5D5CDE; color: white; padding: 10px; text-align: left; font-weight: bold; }' +
+                'td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }' +
+                '.scenario-col { background: #fff8e1; }' +
+                '.trainee-col { background: #e3f2fd; }' +
+                '.action-cell { min-height: 40px; }' +
+                '.action-cell.empty { background: #fafafa; }' +
+                '.timestamp { color: #666; font-size: 0.85em; font-weight: bold; margin-bottom: 3px; }' +
+                '.action-content { color: #333; }' +
+                '.details { color: #888; font-style: italic; margin-top: 3px; font-size: 0.9em; }' +
+                '@media print { body { margin: 0; } button { display: none; } }' +
+                '</style></head><body>' +
+                '<h1>📋 Journal de Session SSI-SSIAP</h1>' +
+                '<div class="meta">' +
+                '<div class="meta-item"><strong>Session ' + log.sessionNumber + '</strong></div>' +
+                '<div class="meta-item">📅 Date: ' + new Date(log.startTime).toLocaleDateString('fr-FR') + '</div>' +
+                '<div class="meta-item">🕐 Heure: ' + new Date(log.startTime).toLocaleTimeString('fr-FR') + ' - ' + new Date(log.endTime).toLocaleTimeString('fr-FR') + '</div>' +
+                '<div class="meta-item">👤 Stagiaire: ' + (log.trainee || 'Inconnu') + '</div>' +
+                '<div class="meta-item">👨‍🏫 Superviseur: ' + (log.supervisor.prenom || 'Superviseur') + ' ' + (log.supervisor.nom || '') + '</div>' +
+                '<div class="meta-item">📊 Actions: ' + supervisorActions.length + ' (scénario) + ' + traineeActions.length + ' (stagiaire) = ' + log.actions.length + ' total</div>' +
+                '</div>' +
+                '<h2>Actions chronologiques</h2>' +
+                '<table>' +
+                '<thead>' +
+                '<tr>' +
+                '<th style="width: 50%;">🎬 SCÉNARIO (Superviseur)</th>' +
+                '<th style="width: 50%;">👤 ACTIONS STAGIAIRE</th>' +
+                '</tr>' +
+                '</thead>' +
+                '<tbody>' +
+                rowsHtml +
+                '</tbody>' +
+                '</table>' +
+                '<script>window.onload = function() { window.print(); };<\/script>' +
+                '</body></html>';
+
+            printWindow.document.write(html);
+            printWindow.document.close();
+        }
+
+        function deleteSessionLog(sessionId) {
+            showCustomConfirm('Êtes-vous sûr de vouloir supprimer ce journal ?', () => {
+                // Supprimer de Firebase
+                db.ref(`session_logs/${sessionId}`).remove();
+
+                // Supprimer du STATE local
+                STATE.sessionLogs = STATE.sessionLogs.filter(l => l.sessionId !== sessionId);
+
+                render();
+                showCustomAlert('Journal supprimé.');
+            });
         }
 
         function updateDetectorAddressInput(type, id, address) {
@@ -1965,8 +3587,11 @@
 
         function changeZoneState(zoneType, id, state) {
             if (!checkSessionBeforeAction()) return;
+            const zones = zoneType === 'compartiment' ? STATE.smsi.compartmentZones : STATE.smsi.smokeZones;
+            const zone = zones.find(z => z.id === id);
             setZoneState(zoneType, id, state);
             sendMessage('SET_ZONE_STATE', { zoneType, id, state });
+            logAction(`Changement état zone ${zone.address}`, state, 'supervisor');
             render();
         }
 
@@ -1984,9 +3609,12 @@
         function toggleAccessLevel(type) {
             if (type === 'sdi') {
                 if (STATE.accessLevel === 1) {
-                    requestAccessCode('sdi', (success) => {
-                        if (success) render();
-                    });
+                    // Demander le code via le pavé numérique
+                    STATE.workflowStep = 'LEVEL2_CODE';
+                    STATE.workflowData = { system: 'sdi' };
+                    STATE.keypadInput = '';
+                    addSdiMessage('Tapez le code niveau 2 et validez');
+                    render();
                 } else {
                     STATE.accessLevel = 1;
                     logAction('Retour niveau 1 SDI');
@@ -1994,9 +3622,12 @@
                 }
             } else {
                 if (STATE.smsiAccessLevel === 1) {
-                    requestAccessCode('smsi', (success) => {
-                        if (success) render();
-                    });
+                    // Demander le code via le pavé numérique
+                    STATE.workflowStep = 'LEVEL2_CODE';
+                    STATE.workflowData = { system: 'smsi' };
+                    STATE.keypadInput = '';
+                    addSmsiMessage('Tapez le code niveau 2 et validez');
+                    render();
                 } else {
                     STATE.smsiAccessLevel = 1;
                     logAction('Retour niveau 1 SMSI');
@@ -2046,14 +3677,12 @@
             zone.commandActive = true;
             render();
 
-            setTimeout(() => {
-                zone.commandActive = false;
-                render();
-            }, 2000);
+            // Le voyant reste allumé jusqu'au réarmement SMSI
         }
 
         function testSignalization() {
             logAction('Test de signalisation');
+            sendMessage('TEST_SIGNALIZATION', { timestamp: Date.now() });
 
             // Sauvegarder les états originaux
             const originalZones = STATE.smsi.compartmentZones.map(z => ({
@@ -2114,8 +3743,60 @@
 
         function bilanSystem() {
             logAction('Demande bilan système');
-            updateAllLeds();
+
+            // Vérifier s'il y a des défauts (voyants orange ou rouge allumés)
+            let hasDefect = false;
+
+            // Vérifier les zones de compartimentage
+            STATE.smsi.compartmentZones.forEach(z => {
+                if (z.ledOrange.on || z.ledRed.on) hasDefect = true;
+            });
+
+            // Vérifier les zones de désenfumage
+            STATE.smsi.smokeZones.forEach(z => {
+                if (z.ledOrange.on || z.ledRed.on) hasDefect = true;
+            });
+
+            // Vérifier les coffrets de relayage
+            STATE.smsi.relayBoxes.forEach(r => {
+                if (r.ledOrange.on || r.ledRed.on) hasDefect = true;
+            });
+
+            // Allumer les voyants verts SAUF pour le matériel en défaut ou hors service
+            STATE.smsi.compartmentZones.forEach(z => {
+                // Voyant vert si pas de défaut (pas de rouge/orange)
+                if (!z.ledOrange.on && !z.ledRed.on) {
+                    z.ledGreen.on = true;
+                }
+            });
+            STATE.smsi.smokeZones.forEach(z => {
+                // Voyant vert si pas de défaut (pas de rouge/orange)
+                if (!z.ledOrange.on && !z.ledRed.on) {
+                    z.ledGreen.on = true;
+                }
+            });
+            STATE.smsi.relayBoxes.forEach(r => {
+                // Voyant vert si pas de défaut (pas de rouge/orange)
+                if (!r.ledOrange.on && !r.ledRed.on) {
+                    r.ledGreen.on = true;
+                }
+            });
+
+            if (!hasDefect) {
+                addSmsiMessage('BILAN: Aucun défaut - Système opérationnel');
+            } else {
+                addSmsiMessage('BILAN: Défauts détectés (voyants rouge/orange)');
+            }
+
             render();
+
+            // Éteindre les voyants verts après 3 secondes
+            setTimeout(() => {
+                STATE.smsi.compartmentZones.forEach(z => z.ledGreen.on = false);
+                STATE.smsi.smokeZones.forEach(z => z.ledGreen.on = false);
+                STATE.smsi.relayBoxes.forEach(r => r.ledGreen.on = false);
+                render();
+            }, 3000);
         }
 
         function commandRelay(id) {
@@ -2125,10 +3806,7 @@
             relay.commandActive = true;
             render();
 
-            setTimeout(() => {
-                relay.commandActive = false;
-                render();
-            }, 2000);
+            // Le voyant reste allumé jusqu'au réarmement SMSI
         }
 
         function stopRelay(id) {
