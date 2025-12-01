@@ -491,6 +491,10 @@
                     STATE.currentSessionNumber = null;
                     STATE.actionLog = []; // Effacer le journal actuel
 
+                    // Remettre SDI et SMSI en veille automatiquement
+                    resetSdiToIdle();
+                    resetSmsiToIdle();
+
                     render();
                     showCustomAlert(`Session ${sessionNumber} terminée. Journal sauvegardé.`);
                 });
@@ -1808,6 +1812,70 @@
             render();
         }
 
+        // Fonctions pour remettre SDI et SMSI en veille (sans log, pour fermeture de session)
+        function resetSdiToIdle() {
+            STATE.sdi.alarms = [];
+            STATE.sdi.fireAlarmActive = false;
+            STATE.sdi.alarmSound = false;
+            STATE.sdi.detectors.forEach(d => d.triggered = false);
+            STATE.sdi.manualAlarms.forEach(d => d.triggered = false);
+            STATE.sdi.systemState = 'service';
+            STATE.sdi.powerState = 'secteur';
+            STATE.sdi.batteryState = 'service';
+            stopAlarmSound();
+
+            // Si une temporisation est en cours, l'arrêter
+            if (STATE.uga.temporizationActive) {
+                clearInterval(temporizationTimer);
+                STATE.uga.temporizationActive = false;
+                STATE.uga.temporizationRemaining = 0;
+            }
+        }
+
+        function resetSmsiToIdle() {
+            STATE.smsi.messages = [];
+            STATE.smsi.alarmSound = false;
+            STATE.smsi.compartmentZones.forEach(z => {
+                z.commandActive = false;
+                z.state = 'attente';
+                z.ledRed.on = false;
+                z.ledRed.blink = false;
+                z.ledOrange.on = false;
+                z.ledOrange.blink = false;
+                z.ledGreen.on = false;
+                z.ledGreen.blink = false;
+            });
+            STATE.smsi.smokeZones.forEach(z => {
+                z.commandActive = false;
+                z.state = 'attente';
+                z.ledRed.on = false;
+                z.ledRed.blink = false;
+                z.ledOrange.on = false;
+                z.ledOrange.blink = false;
+                z.ledGreen.on = false;
+                z.ledGreen.blink = false;
+            });
+            STATE.smsi.relayBoxes.forEach(r => {
+                r.state = 'attente';
+                r.ledRed.on = false;
+                r.ledRed.blink = false;
+                r.ledOrange.on = false;
+                r.ledOrange.blink = false;
+                r.ledGreen.on = false;
+                r.ledGreen.blink = false;
+            });
+            STATE.smsi.systemState = 'service';
+            STATE.smsi.powerState = 'secteur';
+            STATE.smsi.batteryState = 'service';
+
+            // Arrêter TOUS les sons d'alarme
+            STATE.uga.alarmActive = false;
+            STATE.uga.temporizationActive = false;
+            STATE.uga.temporizationRemaining = 0;
+            stopGeneralAlarm();
+            stopAlarmSound();
+        }
+
         // Custom modal dialogs
         function showCustomAlert(message) {
             const modal = document.createElement('div');
@@ -2448,128 +2516,20 @@
                         </div>
                         `}
 
-                        <!-- Video Panel Superviseur -->
-                        ${STATE.sessionActive ? `
-                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
-                            <h3 class="text-2xl font-bold mb-4">📹 Vue Stagiaire</h3>
-
-                            <div id="video-status-section">
-                                ${!STATE.remoteStream ? `
-                                    <div class="text-center py-8">
-                                        <p class="text-gray-600 dark:text-gray-400 mb-4">
-                                            En attente que le stagiaire active sa caméra...
-                                        </p>
-                                        <button onclick="supervisorConnectToVideo()" class="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition font-bold">
-                                            🔗 Se connecter à la vidéo
-                                        </button>
-                                    </div>
-                                ` : `
-                                    <div class="space-y-4">
-                                        <div class="relative bg-black rounded-lg overflow-hidden" style="height: 360px;">
-                                            <video id="trainee-video" autoplay playsinline class="w-full h-full object-cover"></video>
-                                            <div class="absolute top-2 left-2 px-2 py-1 bg-red-500 text-white text-xs rounded">
-                                                🔴 STAGIAIRE EN DIRECT
-                                            </div>
-                                            <div class="absolute bottom-2 right-2">
-                                                <button onclick="disconnectVideo()" class="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700">
-                                                    ⏹️ Déconnecter
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <p class="text-sm text-gray-600 dark:text-gray-400 text-center">
-                                            💡 Vous pouvez voir et entendre le stagiaire pour débriefing
-                                        </p>
-
-                                        <!-- Bouton Mute/Unmute Audio -->
-                                        <div class="bg-${STATE.audioMuted ? 'red' : 'green'}-50 dark:bg-${STATE.audioMuted ? 'red' : 'green'}-900 p-4 rounded-lg border-2 border-${STATE.audioMuted ? 'red' : 'green'}-500">
-                                            <button
-                                                onclick="toggleAudioMute()"
-                                                class="w-full px-6 py-3 bg-${STATE.audioMuted ? 'red' : 'green'}-500 text-white rounded-lg hover:bg-${STATE.audioMuted ? 'red' : 'green'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
-                                            >
-                                                <span class="text-2xl">${STATE.audioMuted ? '🔇' : '🔊'}</span>
-                                                <span>${STATE.audioMuted ? 'SON COUPÉ - Cliquez pour activer' : 'SON ACTIVÉ - Cliquez pour couper'}</span>
-                                            </button>
-                                            <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
-                                                ${STATE.audioMuted ?
-                                                    '⚠️ Audio désactivé par défaut pour éviter le larsen. Utilisez un CASQUE avant d\'activer !' :
-                                                    '✅ Audio activé. Si vous entendez du larsen, COUPEZ immédiatement ou utilisez un casque.'
-                                                }
-                                            </p>
-                                        </div>
-
-                                        <!-- Contrôle de volume audio -->
-                                        ${!STATE.audioMuted ? `
-                                        <div class="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
-                                            <h4 class="font-bold mb-3 flex items-center gap-2">
-                                                🔊 Réglage du Volume
-                                            </h4>
-                                            <div class="flex items-center gap-4">
-                                                <span class="text-sm">🔇</span>
-                                                <input
-                                                    type="range"
-                                                    min="0"
-                                                    max="1"
-                                                    step="0.05"
-                                                    value="${STATE.audioVolume}"
-                                                    oninput="setAudioVolume(this.value); this.nextElementSibling.textContent = Math.round(this.value * 100) + '%'"
-                                                    class="flex-1 h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
-                                                    style="accent-color: #3b82f6;"
-                                                >
-                                                <span class="text-sm font-bold min-w-[50px] text-right">${Math.round(STATE.audioVolume * 100)}%</span>
-                                                <span class="text-sm">🔊</span>
-                                            </div>
-                                            <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                                                💡 Ajustez le volume pour mieux entendre le stagiaire. ⚠️ Volume faible recommandé pour éviter le larsen !
-                                            </p>
-                                        </div>
-                                        ` : ''}
-
-                                        <!-- Contrôles d'enregistrement -->
-                                        <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
-                                            <h4 class="font-bold mb-3 flex items-center gap-2">
-                                                🎬 Enregistrement pour débriefing
-                                                ${STATE.isRecording ? `<span class="px-2 py-1 bg-red-500 text-white text-xs rounded animate-pulse">⏺ REC ${getRecordingDuration()}</span>` : ''}
-                                            </h4>
-                                            <div class="flex gap-2">
-                                                ${!STATE.isRecording ? `
-                                                    <button onclick="startRecording()" class="flex-1 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition font-bold">
-                                                        ⏺ Démarrer l'enregistrement
-                                                    </button>
-                                                ` : `
-                                                    <button onclick="stopRecording()" class="flex-1 px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition font-bold">
-                                                        ⏹️ Arrêter et Télécharger
-                                                    </button>
-                                                `}
-                                            </div>
-                                            <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                                                ${STATE.isRecording ?
-                                                    '📹 Enregistrement VIDÉO + AUDIO en cours... Le fichier sera téléchargé automatiquement à l\'arrêt.' :
-                                                    '💾 L\'enregistrement capture la VIDÉO + AUDIO du stagiaire (même si le son est coupé pour vous).'
-                                                }
-                                            </p>
-                                            ${STATE.audioMuted ? `
-                                            <div class="mt-2 p-2 bg-green-100 dark:bg-green-800 rounded border border-green-500">
-                                                <p class="text-xs text-green-800 dark:text-green-200">
-                                                    ✅ <strong>Audio enregistré :</strong> Le son du stagiaire est capturé dans l'enregistrement même si vous ne l'entendez pas en direct.
-                                                </p>
-                                            </div>
-                                            ` : ''}
-                                        </div>
-                                    </div>
-                                `}
-                            </div>
-                        </div>
-                        ` : ''}
-
-                        <!-- SDI Controls -->
-                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
-                            <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
+                        <!-- Grille 2 colonnes : SDI/SMSI à gauche, Vidéo/Journal à droite -->
+                        <div class="grid lg:grid-cols-2 gap-6">
+                            <!-- Colonne gauche : SDI et SMSI -->
+                            <div class="space-y-6">
+                                <!-- SDI Controls -->
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                    <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
 
                                 <div class="space-y-4">
-                                    <div class="grid grid-cols-3 gap-4">
+                                    <!-- Ligne 1 : État, Alimentation, Batterie -->
+                                    <div class="grid grid-cols-3 gap-2">
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">État système</label>
-                                            <select onchange="changeSdiState(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">État système</label>
+                                            <select onchange="changeSdiState(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="service" ${STATE.sdi.systemState === 'service' ? 'selected' : ''}>En service</option>
                                                 <option value="hors-service" ${STATE.sdi.systemState === 'hors-service' ? 'selected' : ''}>Hors service</option>
                                                 <option value="hors-tension" ${STATE.sdi.systemState === 'hors-tension' ? 'selected' : ''}>Hors tension</option>
@@ -2577,31 +2537,34 @@
                                         </div>
 
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">Alimentation</label>
-                                            <select onchange="changeSdiPower(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">Alimentation</label>
+                                            <select onchange="changeSdiPower(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="secteur" ${STATE.sdi.powerState === 'secteur' ? 'selected' : ''}>Secteur</option>
                                                 <option value="batterie" ${STATE.sdi.powerState === 'batterie' ? 'selected' : ''}>Batterie</option>
                                             </select>
                                         </div>
 
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">Batterie</label>
-                                            <select onchange="changeSdiBattery(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">Batterie</label>
+                                            <select onchange="changeSdiBattery(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="service" ${STATE.sdi.batteryState === 'service' ? 'selected' : ''}>En service</option>
                                                 <option value="hors-service" ${STATE.sdi.batteryState === 'hors-service' ? 'selected' : ''}>Hors service</option>
                                             </select>
                                         </div>
+                                    </div>
 
+                                    <!-- Ligne 2 : Temporisation, Type alarme -->
+                                    <div class="grid grid-cols-2 gap-2">
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">Temporisation</label>
-                                            <select onchange="setTemporization(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">Temporisation</label>
+                                            <select onchange="setTemporization(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 ${[0,1,2,3,4,5].map(m => `<option value="${m}" ${STATE.uga.temporization === m ? 'selected' : ''}>${m} min</option>`).join('')}
                                             </select>
                                         </div>
 
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">Type alarme</label>
-                                            <select onchange="setAlarmType(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">Type alarme</label>
+                                            <select onchange="setAlarmType(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="generale" ${STATE.uga.alarmType === 'generale' ? 'selected' : ''}>Générale</option>
                                                 <option value="generale-selective" ${STATE.uga.alarmType === 'generale-selective' ? 'selected' : ''}>Générale sélective</option>
                                                 <option value="generale-message" ${STATE.uga.alarmType === 'generale-message' ? 'selected' : ''}>Générale avec message</option>
@@ -2614,16 +2577,16 @@
                                         <div>
                                             <h4 class="font-bold mb-2">🔍 DAI</h4>
                                             ${STATE.sdi.detectors.map(d => `
-                                                <div class="flex items-center gap-2 mb-2">
-                                                    <button onclick="${(d.state === 'service' && !d.outOfService) ? `toggleDetector('DAI', ${d.id})` : ''}" class="w-10 h-10 ${(d.outOfService || d.state === 'hors-service') ? 'bg-orange-500' : (d.triggered ? 'bg-red-500' : 'bg-green-500')} rounded-lg border-3 border-black ${(d.state === 'hors-service' || d.outOfService) ? 'cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
-                                                    <span class="text-base font-mono w-16 flex-shrink-0 font-bold ${(d.outOfService || d.state === 'hors-service') ? 'text-orange-600 dark:text-orange-400' : ''}">DAI${String(d.id).padStart(2, '0')}</span>
-                                                    <select onchange="changeDetectorZone('DAI', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                <div class="flex items-center gap-1 mb-1">
+                                                    <button onclick="${(d.state === 'service' && !d.outOfService) ? `toggleDetector('DAI', ${d.id})` : ''}" class="w-8 h-8 ${(d.outOfService || d.state === 'hors-service') ? 'bg-orange-500' : (d.triggered ? 'bg-red-500' : 'bg-green-500')} rounded border-2 border-black ${(d.state === 'hors-service' || d.outOfService) ? 'cursor-not-allowed' : 'hover:opacity-90 cursor-pointer'} flex-shrink-0 text-white text-xs"></button>
+                                                    <span class="text-xs font-mono w-12 flex-shrink-0 font-bold ${(d.outOfService || d.state === 'hors-service') ? 'text-orange-600 dark:text-orange-400' : ''}">DAI${String(d.id).padStart(2, '0')}</span>
+                                                    <select onchange="changeDetectorZone('DAI', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 w-16">
                                                         <option value="ZC1" ${d.zone === 'ZC1' ? 'selected' : ''}>ZC1</option>
                                                         <option value="ZC2" ${d.zone === 'ZC2' ? 'selected' : ''}>ZC2</option>
                                                         <option value="ZC3" ${d.zone === 'ZC3' ? 'selected' : ''}>ZC3</option>
                                                     </select>
-                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DAI', ${d.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                                                    <select onchange="changeDetectorState('DAI', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DAI', ${d.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
+                                                    <select onchange="changeDetectorState('DAI', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 w-12">
                                                         <option value="service" ${(d.state === 'service' && !d.outOfService) ? 'selected' : ''}>OK</option>
                                                         <option value="hors-service" ${(d.state === 'hors-service' || d.outOfService) ? 'selected' : ''}>HS</option>
                                                     </select>
@@ -2634,36 +2597,36 @@
                                         <div>
                                             <h4 class="font-bold mb-2">🚨 DM</h4>
                                             ${STATE.sdi.manualAlarms.map(d => `
-                                                <div class="flex items-center gap-2 mb-2">
-                                                    <button onclick="${(d.state === 'service' && !d.outOfService) ? `toggleDetector('DM', ${d.id})` : ''}" class="w-10 h-10 ${(d.outOfService || d.state === 'hors-service') ? 'bg-orange-500' : (d.triggered ? 'bg-red-500' : 'bg-green-500')} rounded-lg border-3 border-black ${(d.state === 'hors-service' || d.outOfService) ? 'cursor-not-allowed' : 'hover:opacity-90 cursor-pointer shadow-lg'} flex-shrink-0 font-bold text-white"></button>
-                                                    <span class="text-base font-mono w-14 flex-shrink-0 font-bold ${(d.outOfService || d.state === 'hors-service') ? 'text-orange-600 dark:text-orange-400' : ''}">DM${String(d.id).padStart(2, '0')}</span>
-                                                    <select onchange="changeDetectorZone('DM', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                <div class="flex items-center gap-1 mb-1">
+                                                    <button onclick="${(d.state === 'service' && !d.outOfService) ? `toggleDetector('DM', ${d.id})` : ''}" class="w-8 h-8 ${(d.outOfService || d.state === 'hors-service') ? 'bg-orange-500' : (d.triggered ? 'bg-red-500' : 'bg-green-500')} rounded border-2 border-black ${(d.state === 'hors-service' || d.outOfService) ? 'cursor-not-allowed' : 'hover:opacity-90 cursor-pointer'} flex-shrink-0 text-white text-xs"></button>
+                                                    <span class="text-xs font-mono w-12 flex-shrink-0 font-bold ${(d.outOfService || d.state === 'hors-service') ? 'text-orange-600 dark:text-orange-400' : ''}">DM${String(d.id).padStart(2, '0')}</span>
+                                                    <select onchange="changeDetectorZone('DM', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 w-16">
                                                         <option value="ZC1" ${d.zone === 'ZC1' ? 'selected' : ''}>ZC1</option>
                                                         <option value="ZC2" ${d.zone === 'ZC2' ? 'selected' : ''}>ZC2</option>
                                                         <option value="ZC3" ${d.zone === 'ZC3' ? 'selected' : ''}>ZC3</option>
                                                     </select>
-                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DM', ${d.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                                                    <select onchange="changeDetectorState('DM', ${d.id}, this.value)" class="px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${d.address.replace(/^(DAI|DM)\s*\d*-?\d*\s*/, '').trim()}" placeholder="Adresse" onchange="updateDetectorAddressInput('DM', ${d.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
+                                                    <select onchange="changeDetectorState('DM', ${d.id}, this.value)" class="px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 w-12">
                                                         <option value="service" ${(d.state === 'service' && !d.outOfService) ? 'selected' : ''}>OK</option>
                                                         <option value="hors-service" ${(d.state === 'hors-service' || d.outOfService) ? 'selected' : ''}>HS</option>
                                                     </select>
-                                                    <button onclick="resetDM(${d.id})" class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 flex-shrink-0 font-bold">↻</button>
                                                 </div>
                                             `).join('')}
                                         </div>
                                     </div>
+                                    </div>
                                 </div>
-                        </div>
 
-                        <!-- SMSI Controls -->
-                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg mb-6">
-                            <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
+                                <!-- SMSI Controls -->
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                    <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
 
-                                <div class="space-y-4">
-                                    <div class="grid grid-cols-3 gap-4">
+                                    <div class="space-y-4">
+                                    <!-- Ligne 1 : État, Alimentation, Batterie -->
+                                    <div class="grid grid-cols-3 gap-2">
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">État système</label>
-                                            <select onchange="changeSmsiState(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">État système</label>
+                                            <select onchange="changeSmsiState(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="service" ${STATE.smsi.systemState === 'service' ? 'selected' : ''}>En service</option>
                                                 <option value="hors-service" ${STATE.smsi.systemState === 'hors-service' ? 'selected' : ''}>Hors service</option>
                                                 <option value="hors-tension" ${STATE.smsi.systemState === 'hors-tension' ? 'selected' : ''}>Hors tension</option>
@@ -2671,16 +2634,16 @@
                                         </div>
 
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">Alimentation</label>
-                                            <select onchange="changeSmsiPower(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">Alimentation</label>
+                                            <select onchange="changeSmsiPower(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="secteur" ${STATE.smsi.powerState === 'secteur' ? 'selected' : ''}>Secteur</option>
                                                 <option value="batterie" ${STATE.smsi.powerState === 'batterie' ? 'selected' : ''}>Batterie</option>
                                             </select>
                                         </div>
 
                                         <div>
-                                            <label class="block text-sm font-medium mb-2">Batterie</label>
-                                            <select onchange="changeSmsBattery(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                            <label class="block text-xs font-medium mb-1">Batterie</label>
+                                            <select onchange="changeSmsBattery(this.value)" class="w-full px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                                                 <option value="service" ${STATE.smsi.batteryState === 'service' ? 'selected' : ''}>En service</option>
                                                 <option value="hors-service" ${STATE.smsi.batteryState === 'hors-service' ? 'selected' : ''}>Hors service</option>
                                             </select>
@@ -2690,70 +2653,185 @@
                                     <!-- ZC, ZF et Coffrets côte à côte -->
                                     <div class="grid grid-cols-3 gap-2">
                                         <div>
-                                            <h4 class="font-bold mb-2 text-xs">🚪 ZC</h4>
+                                            <h4 class="font-bold mb-1 text-xs">🚪 ZC</h4>
                                             ${STATE.smsi.compartmentZones.map(z => `
-                                                <div class="flex flex-col gap-1 mb-2">
+                                                <div class="flex flex-col gap-1 mb-1">
                                                     <div class="flex items-center gap-1">
-                                                        <span class="text-sm font-mono font-bold">${z.zone}</span>
-                                                        <select onchange="changeZoneState('compartment', ${z.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                        <span class="text-xs font-mono font-bold">${z.zone}</span>
+                                                        <select onchange="changeZoneState('compartment', ${z.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
                                                             <option value="attente" ${z.state === 'attente' ? 'selected' : ''}>Attente</option>
-                                                            <option value="defaut-attente" ${z.state === 'defaut-attente' ? 'selected' : ''}>Défaut position attente</option>
-                                                            <option value="securite" ${z.state === 'securite' ? 'selected' : ''}>En sécurité</option>
-                                                            <option value="defaut-securite" ${z.state === 'defaut-securite' ? 'selected' : ''}>Défaut position de sécurité</option>
-                                                            <option value="defaut-alim" ${z.state === 'defaut-alim' ? 'selected' : ''}>Défaut alimentation</option>
+                                                            <option value="defaut-attente" ${z.state === 'defaut-attente' ? 'selected' : ''}>Déf. attente</option>
+                                                            <option value="securite" ${z.state === 'securite' ? 'selected' : ''}>Sécurité</option>
+                                                            <option value="defaut-securite" ${z.state === 'defaut-securite' ? 'selected' : ''}>Déf. sécurité</option>
+                                                            <option value="defaut-alim" ${z.state === 'defaut-alim' ? 'selected' : ''}>Déf. alim</option>
                                                         </select>
                                                     </div>
-                                                    <input type="text" value="${z.address.replace(/^Compartiment Zone \d+/, '').trim()}" placeholder="Adresse" onchange="updateZoneAddressInput('compartment', ${z.id}, this.value || 'Compart. Z${z.id}')" class="w-full px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${z.address.replace(/^Compartiment Zone \d+/, '').trim()}" placeholder="Adresse" onchange="updateZoneAddressInput('compartment', ${z.id}, this.value || 'Compart. Z${z.id}')" class="w-full px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
                                                 </div>
                                             `).join('')}
                                         </div>
 
                                         <div>
-                                            <h4 class="font-bold mb-2 text-xs">💨 ZF</h4>
+                                            <h4 class="font-bold mb-1 text-xs">💨 ZF</h4>
                                             ${STATE.smsi.smokeZones.map(z => `
-                                                <div class="flex flex-col gap-1 mb-2">
+                                                <div class="flex flex-col gap-1 mb-1">
                                                     <div class="flex items-center gap-1">
-                                                        <span class="text-sm font-mono font-bold">${z.zone}</span>
-                                                        <select onchange="changeZoneState('smoke', ${z.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                        <span class="text-xs font-mono font-bold">${z.zone}</span>
+                                                        <select onchange="changeZoneState('smoke', ${z.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
                                                             <option value="attente" ${z.state === 'attente' ? 'selected' : ''}>Attente</option>
-                                                            <option value="defaut-attente" ${z.state === 'defaut-attente' ? 'selected' : ''}>Défaut position attente</option>
-                                                            <option value="securite" ${z.state === 'securite' ? 'selected' : ''}>En sécurité</option>
-                                                            <option value="defaut-securite" ${z.state === 'defaut-securite' ? 'selected' : ''}>Défaut position de sécurité</option>
-                                                            <option value="defaut-alim" ${z.state === 'defaut-alim' ? 'selected' : ''}>Défaut alimentation</option>
+                                                            <option value="defaut-attente" ${z.state === 'defaut-attente' ? 'selected' : ''}>Déf. attente</option>
+                                                            <option value="securite" ${z.state === 'securite' ? 'selected' : ''}>Sécurité</option>
+                                                            <option value="defaut-securite" ${z.state === 'defaut-securite' ? 'selected' : ''}>Déf. sécurité</option>
+                                                            <option value="defaut-alim" ${z.state === 'defaut-alim' ? 'selected' : ''}>Déf. alim</option>
                                                         </select>
                                                     </div>
-                                                    <input type="text" value="${z.address.replace(/^Désenfumage Zone \d+/, '').trim()}" placeholder="Adresse" onchange="updateZoneAddressInput('smoke', ${z.id}, this.value || 'Désenf. Z${z.id}')" class="w-full px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${z.address.replace(/^Désenfumage Zone \d+/, '').trim()}" placeholder="Adresse" onchange="updateZoneAddressInput('smoke', ${z.id}, this.value || 'Désenf. Z${z.id}')" class="w-full px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
                                                 </div>
                                             `).join('')}
                                         </div>
 
                                         <div>
-                                            <h4 class="font-bold mb-2 text-xs">⚡ Coffrets</h4>
+                                            <h4 class="font-bold mb-1 text-xs">⚡ Coffrets</h4>
                                             ${STATE.smsi.relayBoxes.map(r => `
-                                                <div class="flex flex-col gap-1 mb-2">
+                                                <div class="flex flex-col gap-1 mb-1">
                                                     <div class="flex items-center gap-1">
-                                                        <span class="text-sm font-mono font-bold">CR${r.id}</span>
-                                                        <select onchange="changeZoneState('relay', ${r.id}, this.value)" class="flex-1 px-2 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                        <span class="text-xs font-mono font-bold">CR${r.id}</span>
+                                                        <select onchange="changeZoneState('relay', ${r.id}, this.value)" class="flex-1 px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
                                                             <option value="attente" ${r.state === 'attente' ? 'selected' : ''}>Attente</option>
-                                                            <option value="defaut-attente" ${r.state === 'defaut-attente' ? 'selected' : ''}>Défaut position attente</option>
-                                                            <option value="securite" ${r.state === 'securite' ? 'selected' : ''}>En sécurité</option>
-                                                            <option value="defaut-securite" ${r.state === 'defaut-securite' ? 'selected' : ''}>Défaut position de sécurité</option>
-                                                            <option value="defaut-alim" ${r.state === 'defaut-alim' ? 'selected' : ''}>Défaut alimentation</option>
+                                                            <option value="defaut-attente" ${r.state === 'defaut-attente' ? 'selected' : ''}>Déf. attente</option>
+                                                            <option value="securite" ${r.state === 'securite' ? 'selected' : ''}>Sécurité</option>
+                                                            <option value="defaut-securite" ${r.state === 'defaut-securite' ? 'selected' : ''}>Déf. sécurité</option>
+                                                            <option value="defaut-alim" ${r.state === 'defaut-alim' ? 'selected' : ''}>Déf. alim</option>
                                                         </select>
                                                     </div>
-                                                    <input type="text" value="${r.address.replace(/^Coffret \d+/, '').trim()}" placeholder="Adresse" onchange="updateZoneAddressInput('relay', ${r.id}, this.value || 'Coffret ${r.id}')" class="w-full px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                                                    <input type="text" value="${r.address.replace(/^Coffret \d+/, '').trim()}" placeholder="Adresse" onchange="updateZoneAddressInput('relay', ${r.id}, this.value || 'Coffret ${r.id}')" class="w-full px-1 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-0">
                                                 </div>
                                             `).join('')}
                                         </div>
                                     </div>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
 
-                        <!-- Action Log -->
-                        <div class="mt-6 bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
-                            <h3 class="text-2xl font-bold mb-4 text-primary">📋 Journal des actions du stagiaire</h3>
-                            <div class="ssi-screen max-h-96 overflow-y-auto">
+                            <!-- Colonne droite : Vidéo et Journal -->
+                            <div class="space-y-6">
+                                <!-- Video Panel Superviseur -->
+                                ${STATE.sessionActive ? `
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                    <h3 class="text-2xl font-bold mb-4">📹 Vue Stagiaire</h3>
+
+                                    <div id="video-status-section">
+                                        ${!STATE.remoteStream ? `
+                                            <div class="text-center py-8">
+                                                <p class="text-gray-600 dark:text-gray-400 mb-4">
+                                                    En attente que le stagiaire active sa caméra...
+                                                </p>
+                                                <button onclick="supervisorConnectToVideo()" class="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition font-bold">
+                                                    🔗 Se connecter à la vidéo
+                                                </button>
+                                            </div>
+                                        ` : `
+                                            <div class="space-y-4">
+                                                <div class="relative bg-black rounded-lg overflow-hidden" style="height: 360px;">
+                                                    <video id="trainee-video" autoplay playsinline class="w-full h-full object-cover"></video>
+                                                    <div class="absolute top-2 left-2 px-2 py-1 bg-red-500 text-white text-xs rounded">
+                                                        🔴 STAGIAIRE EN DIRECT
+                                                    </div>
+                                                    <div class="absolute bottom-2 right-2">
+                                                        <button onclick="disconnectVideo()" class="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700">
+                                                            ⏹️ Déconnecter
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <p class="text-sm text-gray-600 dark:text-gray-400 text-center">
+                                                    💡 Vous pouvez voir et entendre le stagiaire pour débriefing
+                                                </p>
+
+                                                <!-- Bouton Mute/Unmute Audio -->
+                                                <div class="bg-${STATE.audioMuted ? 'red' : 'green'}-50 dark:bg-${STATE.audioMuted ? 'red' : 'green'}-900 p-4 rounded-lg border-2 border-${STATE.audioMuted ? 'red' : 'green'}-500">
+                                                    <button
+                                                        onclick="toggleAudioMute()"
+                                                        class="w-full px-6 py-3 bg-${STATE.audioMuted ? 'red' : 'green'}-500 text-white rounded-lg hover:bg-${STATE.audioMuted ? 'red' : 'green'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                                    >
+                                                        <span class="text-2xl">${STATE.audioMuted ? '🔇' : '🔊'}</span>
+                                                        <span>${STATE.audioMuted ? 'SON COUPÉ - Cliquez pour activer' : 'SON ACTIVÉ - Cliquez pour couper'}</span>
+                                                    </button>
+                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
+                                                        ${STATE.audioMuted ?
+                                                            '⚠️ Audio désactivé par défaut pour éviter le larsen. Utilisez un CASQUE avant d\'activer !' :
+                                                            '✅ Audio activé. Si vous entendez du larsen, COUPEZ immédiatement ou utilisez un casque.'
+                                                        }
+                                                    </p>
+                                                </div>
+
+                                                <!-- Contrôle de volume audio -->
+                                                ${!STATE.audioMuted ? `
+                                                <div class="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
+                                                    <h4 class="font-bold mb-3 flex items-center gap-2">
+                                                        🔊 Réglage du Volume
+                                                    </h4>
+                                                    <div class="flex items-center gap-4">
+                                                        <span class="text-sm">🔇</span>
+                                                        <input
+                                                            type="range"
+                                                            min="0"
+                                                            max="1"
+                                                            step="0.05"
+                                                            value="${STATE.audioVolume}"
+                                                            oninput="setAudioVolume(this.value); this.nextElementSibling.textContent = Math.round(this.value * 100) + '%'"
+                                                            class="flex-1 h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                                                            style="accent-color: #3b82f6;"
+                                                        >
+                                                        <span class="text-sm font-bold min-w-[50px] text-right">${Math.round(STATE.audioVolume * 100)}%</span>
+                                                        <span class="text-sm">🔊</span>
+                                                    </div>
+                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                                                        💡 Ajustez le volume pour mieux entendre le stagiaire. ⚠️ Volume faible recommandé pour éviter le larsen !
+                                                    </p>
+                                                </div>
+                                                ` : ''}
+
+                                                <!-- Contrôles d'enregistrement -->
+                                                <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
+                                                    <h4 class="font-bold mb-3 flex items-center gap-2">
+                                                        🎬 Enregistrement pour débriefing
+                                                        ${STATE.isRecording ? `<span class="px-2 py-1 bg-red-500 text-white text-xs rounded animate-pulse">⏺ REC ${getRecordingDuration()}</span>` : ''}
+                                                    </h4>
+                                                    <div class="flex gap-2">
+                                                        ${!STATE.isRecording ? `
+                                                            <button onclick="startRecording()" class="flex-1 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition font-bold">
+                                                                ⏺ Démarrer l'enregistrement
+                                                            </button>
+                                                        ` : `
+                                                            <button onclick="stopRecording()" class="flex-1 px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition font-bold">
+                                                                ⏹️ Arrêter et Télécharger
+                                                            </button>
+                                                        `}
+                                                    </div>
+                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                                                        ${STATE.isRecording ?
+                                                            '📹 Enregistrement VIDÉO + AUDIO en cours... Le fichier sera téléchargé automatiquement à l\'arrêt.' :
+                                                            '💾 L\'enregistrement capture la VIDÉO + AUDIO du stagiaire (même si le son est coupé pour vous).'
+                                                        }
+                                                    </p>
+                                                    ${STATE.audioMuted ? `
+                                                    <div class="mt-2 p-2 bg-green-100 dark:bg-green-800 rounded border border-green-500">
+                                                        <p class="text-xs text-green-800 dark:text-green-200">
+                                                            ✅ <strong>Audio enregistré :</strong> Le son du stagiaire est capturé dans l'enregistrement même si vous ne l'entendez pas en direct.
+                                                        </p>
+                                                    </div>
+                                                    ` : ''}
+                                                </div>
+                                            </div>
+                                        `}
+                                    </div>
+                                </div>
+                                ` : ''}
+
+                                <!-- Action Log -->
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                    <h3 class="text-2xl font-bold mb-4 text-primary">📋 Journal des actions du stagiaire</h3>
+                                    <div class="ssi-screen max-h-96 overflow-y-auto overflow-x-hidden" style="word-break: break-word; max-width: 100%;">
                                 ${STATE.actionLog.length === 0 ?
                                     '<div class="text-center opacity-50">Aucune action enregistrée</div>' :
                                     STATE.actionLog.slice(-20).reverse().map(log => `
@@ -2764,6 +2842,8 @@
                                         </div>
                                     `).join('')
                                 }
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -3053,6 +3133,25 @@
                                     <button onclick="traineeResetSmsiSystem()" class="flex-1 px-3 py-1 ${canResetSmsiSystem() ? 'bg-green-600' : 'bg-gray-600 opacity-50'} text-white rounded text-xs">
                                         🔄 RÉARMEMENT SMSI
                                     </button>
+                                </div>
+                            </div>
+
+                            <!-- Action Log - Pleine largeur sous SDI et SMSI -->
+                            <div class="lg:col-span-2">
+                                <div class="ssi-panel">
+                                    <h3 class="text-xl font-bold mb-3 text-white">📋 Journal des actions du stagiaire</h3>
+                                    <div class="ssi-screen max-h-96 overflow-y-auto">
+                                        ${STATE.actionLog.length === 0 ?
+                                            '<div class="text-center opacity-50">Aucune action enregistrée</div>' :
+                                            STATE.actionLog.slice(-20).reverse().map(log => `
+                                                <div class="mb-2 pb-2 border-b border-green-900">
+                                                    <div class="text-xs opacity-75">${new Date(log.timestamp).toLocaleString('fr-FR')}</div>
+                                                    <div>${log.trainee}: <span class="text-yellow-400">${log.action}</span></div>
+                                                    ${log.details ? `<div class="text-sm opacity-75">${log.details}</div>` : ''}
+                                                </div>
+                                            `).join('')
+                                        }
+                                    </div>
                                 </div>
                             </div>
                         </div>
