@@ -289,7 +289,12 @@
 
             // Contrôle de volume audio
             audioVolume: 0.5, // Volume par défaut (0.0 à 1.0)
-            audioMuted: true // Audio muet par défaut pour éviter le larsen
+            audioMuted: true, // Audio muet par défaut pour éviter le larsen
+
+            // Micro superviseur (push-to-talk)
+            supervisorMicActive: false,
+            supervisorMicStream: null,
+            supervisorPeerConnection: null
         };
 
         // Communication via Firebase
@@ -493,6 +498,19 @@
                     STATE.sessionId = null;
                     STATE.currentSessionNumber = null;
                     STATE.actionLog = []; // Effacer le journal actuel
+
+                    // Couper le micro superviseur s'il est actif
+                    if (STATE.supervisorMicActive) {
+                        if (STATE.supervisorMicStream) {
+                            STATE.supervisorMicStream.getTracks().forEach(track => track.stop());
+                            STATE.supervisorMicStream = null;
+                        }
+                        if (STATE.supervisorPeerConnection) {
+                            STATE.supervisorPeerConnection.close();
+                            STATE.supervisorPeerConnection = null;
+                        }
+                        STATE.supervisorMicActive = false;
+                    }
 
                     // Remettre SDI et SMSI en veille automatiquement
                     resetSdiToIdle();
@@ -865,6 +883,108 @@
             }
         }
 
+        // Stagiaire: Recevoir l'audio du superviseur
+        async function handleSupervisorMicOffer(offer) {
+            try {
+                STATE.supervisorPeerConnection = new RTCPeerConnection(iceServers);
+
+                // Gérer la réception du flux audio
+                STATE.supervisorPeerConnection.ontrack = (event) => {
+                    // Créer un élément audio pour jouer le son du superviseur
+                    const audioElement = document.getElementById('supervisor-audio') || document.createElement('audio');
+                    audioElement.id = 'supervisor-audio';
+                    audioElement.autoplay = true;
+                    audioElement.srcObject = event.streams[0];
+                    if (!document.getElementById('supervisor-audio')) {
+                        document.body.appendChild(audioElement);
+                    }
+                };
+
+                // Gérer les ICE candidates
+                STATE.supervisorPeerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        sendMessage('TRAINEE_MIC_ICE_CANDIDATE', {
+                            candidate: event.candidate
+                        });
+                    }
+                };
+
+                // Accepter l'offre et créer une réponse
+                await STATE.supervisorPeerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await STATE.supervisorPeerConnection.createAnswer();
+                await STATE.supervisorPeerConnection.setLocalDescription(answer);
+
+                // Envoyer la réponse au superviseur
+                sendMessage('TRAINEE_MIC_ANSWER', {
+                    answer: answer
+                });
+            } catch (error) {
+                console.error('Erreur réception audio superviseur:', error);
+            }
+        }
+
+        // Micro superviseur (Push-to-Talk)
+        async function toggleSupervisorMic() {
+            if (!STATE.supervisorMicActive) {
+                // Activer le micro
+                try {
+                    STATE.supervisorMicStream = await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: false
+                    });
+
+                    // Créer une connexion WebRTC pour envoyer l'audio au stagiaire
+                    if (STATE.sessionId) {
+                        STATE.supervisorPeerConnection = new RTCPeerConnection(iceServers);
+
+                        // Ajouter les pistes audio au peer connection
+                        STATE.supervisorMicStream.getTracks().forEach(track => {
+                            STATE.supervisorPeerConnection.addTrack(track, STATE.supervisorMicStream);
+                        });
+
+                        // Gérer les ICE candidates
+                        STATE.supervisorPeerConnection.onicecandidate = (event) => {
+                            if (event.candidate) {
+                                sendMessage('SUPERVISOR_MIC_ICE_CANDIDATE', {
+                                    candidate: event.candidate
+                                });
+                            }
+                        };
+
+                        // Créer et envoyer l'offre
+                        const offer = await STATE.supervisorPeerConnection.createOffer();
+                        await STATE.supervisorPeerConnection.setLocalDescription(offer);
+
+                        sendMessage('SUPERVISOR_MIC_OFFER', {
+                            offer: offer
+                        });
+
+                        STATE.supervisorMicActive = true;
+                        render();
+                    }
+                } catch (error) {
+                    console.error('Erreur micro superviseur:', error);
+                    showCustomAlert('Impossible d\'activer le microphone. Vérifiez les autorisations.');
+                }
+            } else {
+                // Désactiver le micro
+                if (STATE.supervisorMicStream) {
+                    STATE.supervisorMicStream.getTracks().forEach(track => track.stop());
+                    STATE.supervisorMicStream = null;
+                }
+                if (STATE.supervisorPeerConnection) {
+                    STATE.supervisorPeerConnection.close();
+                    STATE.supervisorPeerConnection = null;
+                }
+
+                // Informer le stagiaire d'arrêter de recevoir
+                sendMessage('SUPERVISOR_MIC_STOP', {});
+
+                STATE.supervisorMicActive = false;
+                render();
+            }
+        }
+
         // Warning before closing page
         window.addEventListener('beforeunload', (e) => {
             if (STATE.userType === 'supervisor' && STATE.sessionActive) {
@@ -983,6 +1103,23 @@
                     // Exécuter le test de signalisation côté stagiaire
                     testSignalization();
                     break;
+                case 'SUPERVISOR_MIC_OFFER':
+                    // Recevoir l'offre audio du superviseur
+                    handleSupervisorMicOffer(data.offer);
+                    break;
+                case 'SUPERVISOR_MIC_ICE_CANDIDATE':
+                    // Recevoir un ICE candidate du superviseur
+                    if (STATE.supervisorPeerConnection) {
+                        STATE.supervisorPeerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    }
+                    break;
+                case 'SUPERVISOR_MIC_STOP':
+                    // Le superviseur a coupé son micro
+                    if (STATE.supervisorPeerConnection) {
+                        STATE.supervisorPeerConnection.close();
+                        STATE.supervisorPeerConnection = null;
+                    }
+                    break;
             }
             render();
         }
@@ -1006,6 +1143,18 @@
                     const detector = detectorArr.find(d => d.id === data.id);
                     if (detector) {
                         detector.state = data.state;
+                    }
+                    break;
+                case 'TRAINEE_MIC_ANSWER':
+                    // Recevoir la réponse du stagiaire pour la connexion audio
+                    if (STATE.supervisorPeerConnection) {
+                        STATE.supervisorPeerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                    }
+                    break;
+                case 'TRAINEE_MIC_ICE_CANDIDATE':
+                    // Recevoir un ICE candidate du stagiaire
+                    if (STATE.supervisorPeerConnection) {
+                        STATE.supervisorPeerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
                     }
                     break;
             }
@@ -2758,6 +2907,23 @@
                                                         ${STATE.audioMuted ?
                                                             '⚠️ Audio désactivé par défaut pour éviter le larsen. Utilisez un CASQUE avant d\'activer !' :
                                                             '✅ Audio activé. Si vous entendez du larsen, COUPEZ immédiatement ou utilisez un casque.'
+                                                        }
+                                                    </p>
+                                                </div>
+
+                                                <!-- Bouton Micro Superviseur (Push-to-Talk) -->
+                                                <div class="bg-${STATE.supervisorMicActive ? 'green' : 'blue'}-50 dark:bg-${STATE.supervisorMicActive ? 'green' : 'blue'}-900 p-4 rounded-lg border-2 border-${STATE.supervisorMicActive ? 'green' : 'blue'}-500">
+                                                    <button
+                                                        onclick="toggleSupervisorMic()"
+                                                        class="w-full px-6 py-3 bg-${STATE.supervisorMicActive ? 'green' : 'blue'}-500 text-white rounded-lg hover:bg-${STATE.supervisorMicActive ? 'green' : 'blue'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                                    >
+                                                        <span class="text-2xl">${STATE.supervisorMicActive ? '🎤' : '🔇'}</span>
+                                                        <span>${STATE.supervisorMicActive ? 'MICRO ACTIF - Cliquez pour couper' : 'PARLER AU STAGIAIRE - Cliquez pour activer'}</span>
+                                                    </button>
+                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
+                                                        ${STATE.supervisorMicActive ?
+                                                            '🎤 Votre micro est actif. Le stagiaire vous entend. Cliquez pour couper.' :
+                                                            '💬 Activez votre micro pour parler au stagiaire (communication unidirectionnelle)'
                                                         }
                                                     </p>
                                                 </div>
