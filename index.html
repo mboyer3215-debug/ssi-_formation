@@ -264,8 +264,6 @@
 
             actionLog: [],
             sessionLogs: [], // Historique de tous les journaux de session
-            sessionYear: new Date().getFullYear(), // Année en cours
-            sessionCounter: 0, // Compteur annuel de sessions (remis à 0 chaque année)
             searchQuery: '', // Recherche dans les journaux
 
             // Système de mise hors service
@@ -290,7 +288,9 @@
             // Contrôle de volume audio
             audioVolume: 0.5, // Volume par défaut (0.0 à 1.0)
             audioMuted: true, // Audio muet par défaut pour éviter le larsen
-            supervisorMicActive: false // Micro du superviseur désactivé par défaut
+
+            // Micro du superviseur (push-to-talk)
+            supervisorMicActive: false // Micro superviseur désactivé par défaut
         };
 
         // Communication via Firebase
@@ -396,25 +396,21 @@
                 return;
             }
 
-            // Générer le numéro de session au format AANNN
-            const currentYear = new Date().getFullYear();
-            const yearSuffix = currentYear % 100; // 2025 → 25, 2026 → 26
+            // Générer le numéro de session au format AAAAMMJJHHMMSS (date/heure)
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
 
-            // Si on change d'année, réinitialiser le compteur
-            if (currentYear !== STATE.sessionYear) {
-                STATE.sessionYear = currentYear;
-                STATE.sessionCounter = 0;
-            }
-
-            STATE.sessionCounter++; // Incrémenter le compteur annuel
-            const sessionNumber = `${yearSuffix}${String(STATE.sessionCounter).padStart(3, '0')}`; // Ex: 25001
+            const sessionNumber = `${year}${month}${day}${hours}${minutes}${seconds}`; // Ex: 20251204230745
 
             const sessionId = Date.now().toString();
             const sessionData = {
                 id: sessionId,
                 sessionNumber: sessionNumber,
-                sessionYear: currentYear,
-                sessionCounter: STATE.sessionCounter,
                 startTime: firebase.database.ServerValue.TIMESTAMP,
                 endTime: null,
                 active: true,
@@ -467,8 +463,6 @@
                         const sessionLog = {
                             sessionId: sessionId,
                             sessionNumber: sessionNumber,
-                            sessionYear: STATE.sessionYear,
-                            sessionCounter: STATE.sessionCounter,
                             startTime: new Date().toISOString(),
                             endTime: new Date().toISOString(),
                             supervisor: STATE.currentUser || 'Superviseur',
@@ -857,34 +851,6 @@
             render();
         }
 
-        // Fonction pour activer/désactiver le micro du superviseur
-        async function toggleSupervisorMic() {
-            if (!STATE.supervisorMicActive) {
-                // Activer le micro
-                try {
-                    if (!STATE.localStream) {
-                        STATE.localStream = await navigator.mediaDevices.getUserMedia({
-                            audio: true,
-                            video: false
-                        });
-                    }
-                    STATE.supervisorMicActive = true;
-                    showCustomAlert('🎤 Micro activé - Vous pouvez parler au stagiaire');
-                } catch (error) {
-                    console.error('Erreur accès micro:', error);
-                    showCustomAlert('Impossible d\'accéder au micro. Vérifiez les permissions.');
-                }
-            } else {
-                // Désactiver le micro
-                if (STATE.localStream) {
-                    STATE.localStream.getAudioTracks().forEach(track => track.enabled = false);
-                }
-                STATE.supervisorMicActive = false;
-                showCustomAlert('🔇 Micro désactivé');
-            }
-            render();
-        }
-
         // Fonction pour ajuster le volume audio
         function setAudioVolume(volume) {
             STATE.audioVolume = parseFloat(volume);
@@ -892,6 +858,15 @@
             if (remoteVideo && !STATE.audioMuted) {
                 remoteVideo.volume = STATE.audioVolume;
             }
+        }
+
+        // Fonction pour activer/désactiver le micro du superviseur
+        function toggleSupervisorMic() {
+            STATE.supervisorMicActive = !STATE.supervisorMicActive;
+            // Note: L'activation réelle du micro du superviseur nécessiterait
+            // d'envoyer son flux audio au stagiaire via WebRTC
+            // Pour l'instant, c'est juste un toggle visuel
+            render();
         }
 
         // Warning before closing page
@@ -2033,15 +2008,6 @@
                 if (logs) {
                     STATE.sessionLogs = Object.values(logs);
 
-                    // Trouver le compteur le plus élevé pour l'année en cours
-                    const currentYear = new Date().getFullYear();
-                    const currentYearLogs = STATE.sessionLogs.filter(log => log.sessionYear === currentYear);
-
-                    if (currentYearLogs.length > 0) {
-                        const maxCounter = Math.max(...currentYearLogs.map(log => log.sessionCounter || 0));
-                        STATE.sessionCounter = maxCounter;
-                        STATE.sessionYear = currentYear;
-                    }
                 }
             });
 
@@ -2758,113 +2724,74 @@
                                                 </button>
                                             </div>
                                         ` : `
-                                            <div class="space-y-4">
-                                                <div class="relative bg-black rounded-lg overflow-hidden" style="height: 360px;">
+                                            <div class="space-y-3">
+                                                <!-- Vidéo -->
+                                                <div class="relative bg-black rounded-lg overflow-hidden" style="height: 280px;">
                                                     <video id="trainee-video" autoplay playsinline class="w-full h-full object-cover"></video>
                                                     <div class="absolute top-2 left-2 px-2 py-1 bg-red-500 text-white text-xs rounded">
                                                         🔴 STAGIAIRE EN DIRECT
                                                     </div>
                                                     <div class="absolute bottom-2 right-2">
-                                                        <button onclick="disconnectVideo()" class="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700">
+                                                        <button onclick="disconnectVideo()" class="px-2 py-1 bg-gray-600 text-white rounded hover:bg-gray-700 text-xs">
                                                             ⏹️ Déconnecter
                                                         </button>
                                                     </div>
                                                 </div>
-                                                <p class="text-sm text-gray-600 dark:text-gray-400 text-center">
-                                                    💡 Vous pouvez voir et entendre le stagiaire pour débriefing
-                                                </p>
 
-                                                <!-- Bouton Mute/Unmute Audio -->
-                                                <div class="bg-${STATE.audioMuted ? 'red' : 'green'}-50 dark:bg-${STATE.audioMuted ? 'red' : 'green'}-900 p-4 rounded-lg border-2 border-${STATE.audioMuted ? 'red' : 'green'}-500">
+                                                <!-- 3 boutons en ligne : Son + Micro + Enregistrer -->
+                                                <div class="grid grid-cols-3 gap-2">
+                                                    <!-- Bouton SON -->
                                                     <button
                                                         onclick="toggleAudioMute()"
-                                                        class="w-full px-6 py-3 bg-${STATE.audioMuted ? 'red' : 'green'}-500 text-white rounded-lg hover:bg-${STATE.audioMuted ? 'red' : 'green'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                                        class="px-4 py-3 bg-${STATE.audioMuted ? 'red' : 'green'}-500 text-white rounded-lg hover:bg-${STATE.audioMuted ? 'red' : 'green'}-600 transition font-bold flex flex-col items-center justify-center gap-1"
                                                     >
                                                         <span class="text-2xl">${STATE.audioMuted ? '🔇' : '🔊'}</span>
-                                                        <span>${STATE.audioMuted ? 'SON COUPÉ - Cliquez pour activer' : 'SON ACTIVÉ - Cliquez pour couper'}</span>
+                                                        <span class="text-xs">${STATE.audioMuted ? 'Son' : 'Son'}</span>
                                                     </button>
-                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
-                                                        ${STATE.audioMuted ?
-                                                            '⚠️ Audio désactivé par défaut pour éviter le larsen. Utilisez un CASQUE avant d\'activer !' :
-                                                            '✅ Audio activé. Si vous entendez du larsen, COUPEZ immédiatement ou utilisez un casque.'
-                                                        }
-                                                    </p>
-                                                </div>
 
-                                                <!-- Contrôle de volume audio -->
-                                                ${!STATE.audioMuted ? `
-                                                <div class="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
-                                                    <h4 class="font-bold mb-3 flex items-center gap-2">
-                                                        🔊 Réglage du Volume
-                                                    </h4>
-                                                    <div class="flex items-center gap-4">
-                                                        <span class="text-sm">🔇</span>
-                                                        <input
-                                                            type="range"
-                                                            min="0"
-                                                            max="1"
-                                                            step="0.05"
-                                                            value="${STATE.audioVolume}"
-                                                            oninput="setAudioVolume(this.value); this.nextElementSibling.textContent = Math.round(this.value * 100) + '%'"
-                                                            class="flex-1 h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
-                                                            style="accent-color: #3b82f6;"
-                                                        >
-                                                        <span class="text-sm font-bold min-w-[50px] text-right">${Math.round(STATE.audioVolume * 100)}%</span>
-                                                        <span class="text-sm">🔊</span>
-                                                    </div>
-                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                                                        💡 Ajustez le volume pour mieux entendre le stagiaire. ⚠️ Volume faible recommandé pour éviter le larsen !
-                                                    </p>
-                                                </div>
-                                                ` : ''}
-
-                                                <!-- Bouton Micro du superviseur pour parler au stagiaire -->
-                                                <div class="bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-50 dark:bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-900 p-4 rounded-lg border-2 border-${STATE.supervisorMicActive ? 'blue' : 'gray'}-500">
+                                                    <!-- Bouton MICRO -->
                                                     <button
                                                         onclick="toggleSupervisorMic()"
-                                                        class="w-full px-6 py-3 bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-500 text-white rounded-lg hover:bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                                        class="px-4 py-3 bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-500 text-white rounded-lg hover:bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-600 transition font-bold flex flex-col items-center justify-center gap-1"
                                                     >
-                                                        <span class="text-2xl">${STATE.supervisorMicActive ? '🎤' : '🎙️'}</span>
-                                                        <span>${STATE.supervisorMicActive ? 'MICRO ACTIVÉ - Appuyez pour couper' : 'MICRO COUPÉ - Appuyez pour parler'}</span>
+                                                        <span class="text-2xl">🎤</span>
+                                                        <span class="text-xs">Micro</span>
                                                     </button>
-                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
-                                                        ${STATE.supervisorMicActive ?
-                                                            '🎤 Vous parlez au stagiaire. Appuyez à nouveau pour couper le micro.' :
-                                                            '🎙️ Activez votre micro pour communiquer avec le stagiaire pendant le débriefing.'
-                                                        }
-                                                    </p>
+
+                                                    <!-- Bouton ENREGISTRER -->
+                                                    ${!STATE.isRecording ? `
+                                                    <button
+                                                        onclick="startRecording()"
+                                                        class="px-4 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600 transition font-bold flex flex-col items-center justify-center gap-1"
+                                                    >
+                                                        <span class="text-2xl">🎬</span>
+                                                        <span class="text-xs">Enregistrer</span>
+                                                    </button>
+                                                    ` : `
+                                                    <button
+                                                        onclick="stopRecording()"
+                                                        class="px-4 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition font-bold flex flex-col items-center justify-center gap-1 animate-pulse"
+                                                    >
+                                                        <span class="text-2xl">⏹️</span>
+                                                        <span class="text-xs">${getRecordingDuration()}</span>
+                                                    </button>
+                                                    `}
                                                 </div>
 
-                                                <!-- Contrôles d'enregistrement -->
-                                                <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
-                                                    <h4 class="font-bold mb-3 flex items-center gap-2">
-                                                        🎬 Enregistrement pour débriefing
-                                                        ${STATE.isRecording ? `<span class="px-2 py-1 bg-red-500 text-white text-xs rounded animate-pulse">⏺ REC ${getRecordingDuration()}</span>` : ''}
-                                                    </h4>
-                                                    <div class="flex gap-2">
-                                                        ${!STATE.isRecording ? `
-                                                            <button onclick="startRecording()" class="flex-1 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition font-bold">
-                                                                ⏺ Démarrer l'enregistrement
-                                                            </button>
-                                                        ` : `
-                                                            <button onclick="stopRecording()" class="flex-1 px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition font-bold">
-                                                                ⏹️ Arrêter et Télécharger
-                                                            </button>
-                                                        `}
-                                                    </div>
-                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2">
-                                                        ${STATE.isRecording ?
-                                                            '📹 Enregistrement VIDÉO + AUDIO en cours... Le fichier sera téléchargé automatiquement à l\'arrêt.' :
-                                                            '💾 L\'enregistrement capture la VIDÉO + AUDIO du stagiaire (même si le son est coupé pour vous).'
-                                                        }
-                                                    </p>
-                                                    ${STATE.audioMuted ? `
-                                                    <div class="mt-2 p-2 bg-green-100 dark:bg-green-800 rounded border border-green-500">
-                                                        <p class="text-xs text-green-800 dark:text-green-200">
-                                                            ✅ <strong>Audio enregistré :</strong> Le son du stagiaire est capturé dans l'enregistrement même si vous ne l'entendez pas en direct.
-                                                        </p>
-                                                    </div>
-                                                    ` : ''}
+                                                <!-- Infos complémentaires -->
+                                                <div class="text-xs text-gray-600 dark:text-gray-400 space-y-1">
+                                                    ${STATE.audioMuted ?
+                                                        '<p>⚠️ Son coupé. Utilisez un CASQUE avant activation !</p>' :
+                                                        '<p>✅ Son activé. Si larsen, coupez immédiatement !</p>'
+                                                    }
+                                                    ${STATE.supervisorMicActive ?
+                                                        '<p>🎤 Micro activé - Le stagiaire vous entend</p>' :
+                                                        '<p>🔇 Micro coupé - Le stagiaire ne vous entend pas</p>'
+                                                    }
+                                                    ${STATE.isRecording ?
+                                                        '<p>🎬 Enregistrement en cours (vidéo + audio)</p>' :
+                                                        ''
+                                                    }
                                                 </div>
                                             </div>
                                         `}
