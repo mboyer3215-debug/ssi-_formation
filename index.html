@@ -290,9 +290,7 @@
             // Contrôle de volume audio
             audioVolume: 0.5, // Volume par défaut (0.0 à 1.0)
             audioMuted: true, // Audio muet par défaut pour éviter le larsen
-
-            // Microphone superviseur pour parler au stagiaire
-            supervisorMicEnabled: false
+            supervisorMicActive: false // Micro du superviseur désactivé par défaut
         };
 
         // Communication via Firebase
@@ -859,54 +857,32 @@
             render();
         }
 
-        // Fonction pour activer/désactiver le micro superviseur (pour parler au stagiaire)
+        // Fonction pour activer/désactiver le micro du superviseur
         async function toggleSupervisorMic() {
-            if (!STATE.supervisorMicEnabled) {
+            if (!STATE.supervisorMicActive) {
                 // Activer le micro
                 try {
-                    // Demander l'accès au micro du superviseur
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-                    // Créer un AudioContext pour gérer l'audio
-                    const audioContext = new AudioContext();
-                    const source = audioContext.createMediaStreamSource(stream);
-                    const destination = audioContext.createMediaStreamDestination();
-                    source.connect(destination);
-
-                    // Stocker le stream et le context
-                    STATE.supervisorMicStream = stream;
-                    STATE.supervisorAudioContext = audioContext;
-                    STATE.supervisorMicEnabled = true;
-
-                    // Envoyer l'audio au stagiaire via WebRTC si la connexion existe
-                    if (STATE.peerConnection && STATE.peerConnection.getSenders) {
-                        const audioTrack = stream.getAudioTracks()[0];
-                        const sender = STATE.peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
-                        if (sender) {
-                            sender.replaceTrack(audioTrack);
-                        } else {
-                            STATE.peerConnection.addTrack(audioTrack, stream);
-                        }
+                    if (!STATE.localStream) {
+                        STATE.localStream = await navigator.mediaDevices.getUserMedia({
+                            audio: true,
+                            video: false
+                        });
                     }
-
-                    render();
+                    STATE.supervisorMicActive = true;
+                    showCustomAlert('🎤 Micro activé - Vous pouvez parler au stagiaire');
                 } catch (error) {
-                    console.error('Erreur accès micro superviseur:', error);
+                    console.error('Erreur accès micro:', error);
                     showCustomAlert('Impossible d\'accéder au micro. Vérifiez les permissions.');
                 }
             } else {
                 // Désactiver le micro
-                if (STATE.supervisorMicStream) {
-                    STATE.supervisorMicStream.getTracks().forEach(track => track.stop());
-                    STATE.supervisorMicStream = null;
+                if (STATE.localStream) {
+                    STATE.localStream.getAudioTracks().forEach(track => track.enabled = false);
                 }
-                if (STATE.supervisorAudioContext) {
-                    STATE.supervisorAudioContext.close();
-                    STATE.supervisorAudioContext = null;
-                }
-                STATE.supervisorMicEnabled = false;
-                render();
+                STATE.supervisorMicActive = false;
+                showCustomAlert('🔇 Micro désactivé');
             }
+            render();
         }
 
         // Fonction pour ajuster le volume audio
@@ -2815,23 +2791,6 @@
                                                     </p>
                                                 </div>
 
-                                                <!-- Bouton MICRO pour parler au stagiaire -->
-                                                <div class="bg-${STATE.supervisorMicEnabled ? 'green' : 'blue'}-50 dark:bg-${STATE.supervisorMicEnabled ? 'green' : 'blue'}-900 p-4 rounded-lg border-2 border-${STATE.supervisorMicEnabled ? 'green' : 'blue'}-500">
-                                                    <button
-                                                        onclick="toggleSupervisorMic()"
-                                                        class="w-full px-6 py-3 bg-${STATE.supervisorMicEnabled ? 'green' : 'blue'}-500 text-white rounded-lg hover:bg-${STATE.supervisorMicEnabled ? 'green' : 'blue'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
-                                                    >
-                                                        <span class="text-2xl">${STATE.supervisorMicEnabled ? '🎤' : '🎤'}</span>
-                                                        <span>${STATE.supervisorMicEnabled ? 'MICRO ACTIVÉ - Le stagiaire vous entend' : 'MICRO COUPÉ - Cliquez pour parler au stagiaire'}</span>
-                                                    </button>
-                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
-                                                        ${STATE.supervisorMicEnabled ?
-                                                            '✅ Votre microphone est activé. Le stagiaire peut vous entendre.' :
-                                                            '🎤 Cliquez pour activer votre micro et communiquer avec le stagiaire.'
-                                                        }
-                                                    </p>
-                                                </div>
-
                                                 <!-- Contrôle de volume audio -->
                                                 ${!STATE.audioMuted ? `
                                                 <div class="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
@@ -2858,6 +2817,23 @@
                                                     </p>
                                                 </div>
                                                 ` : ''}
+
+                                                <!-- Bouton Micro du superviseur pour parler au stagiaire -->
+                                                <div class="bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-50 dark:bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-900 p-4 rounded-lg border-2 border-${STATE.supervisorMicActive ? 'blue' : 'gray'}-500">
+                                                    <button
+                                                        onclick="toggleSupervisorMic()"
+                                                        class="w-full px-6 py-3 bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-500 text-white rounded-lg hover:bg-${STATE.supervisorMicActive ? 'blue' : 'gray'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                                    >
+                                                        <span class="text-2xl">${STATE.supervisorMicActive ? '🎤' : '🎙️'}</span>
+                                                        <span>${STATE.supervisorMicActive ? 'MICRO ACTIVÉ - Appuyez pour couper' : 'MICRO COUPÉ - Appuyez pour parler'}</span>
+                                                    </button>
+                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
+                                                        ${STATE.supervisorMicActive ?
+                                                            '🎤 Vous parlez au stagiaire. Appuyez à nouveau pour couper le micro.' :
+                                                            '🎙️ Activez votre micro pour communiquer avec le stagiaire pendant le débriefing.'
+                                                        }
+                                                    </p>
+                                                </div>
 
                                                 <!-- Contrôles d'enregistrement -->
                                                 <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
