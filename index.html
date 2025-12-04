@@ -2517,7 +2517,7 @@
                         <!-- Grille 2 colonnes : SDI/SMSI à gauche, Vidéo/Journal à droite -->
                         <div class="grid lg:grid-cols-2 gap-6">
                             <!-- Colonne gauche : SDI et SMSI -->
-                            <div class="space-y-6">
+                            <div class="flex flex-col gap-6">
                                 <!-- SDI Controls -->
                                 <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
                                     <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
@@ -2612,7 +2612,7 @@
                                 </div>
 
                                 <!-- SMSI Controls -->
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg flex-1">
                                     <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
 
                                     <div class="space-y-4">
@@ -2707,22 +2707,14 @@
                             </div>
 
                             <!-- Colonne droite : Vidéo et Journal -->
-                            <div class="space-y-6">
+                            <div class="flex flex-col gap-6">
                                 <!-- Video Panel Superviseur -->
+                                ${STATE.sessionActive ? `
                                 <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
                                     <h3 class="text-2xl font-bold mb-4">📹 Vue Stagiaire</h3>
 
                                     <div id="video-status-section">
-                                        ${!STATE.sessionActive ? `
-                                            <div class="text-center py-8">
-                                                <p class="text-gray-600 dark:text-gray-400 mb-4">
-                                                    Aucune session active
-                                                </p>
-                                                <p class="text-xs text-gray-500">
-                                                    Démarrez une session pour voir la vidéo du stagiaire
-                                                </p>
-                                            </div>
-                                        ` : !STATE.remoteStream ? `
+                                        ${!STATE.remoteStream ? `
                                             <div class="text-center py-8">
                                                 <p class="text-gray-600 dark:text-gray-400 mb-4">
                                                     En attente que le stagiaire active sa caméra...
@@ -2732,9 +2724,9 @@
                                                 </button>
                                             </div>
                                         ` : `
-                                            <div class="space-y-3">
+                                            <div class="flex flex-col gap-3 h-full">
                                                 <!-- Vidéo -->
-                                                <div class="relative bg-black rounded-lg overflow-hidden" style="height: 280px;">
+                                                <div class="relative bg-black rounded-lg overflow-hidden flex-1" style="min-height: 400px;">
                                                     <video id="trainee-video" autoplay playsinline class="w-full h-full object-cover"></video>
                                                     <div class="absolute top-2 left-2 px-2 py-1 bg-red-500 text-white text-xs rounded">
                                                         🔴 STAGIAIRE EN DIRECT
@@ -2805,11 +2797,12 @@
                                         `}
                                     </div>
                                 </div>
+                                ` : ''}
 
                                 <!-- Action Log -->
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg flex-1 flex flex-col">
                                     <h3 class="text-2xl font-bold mb-4 text-primary">📋 Journal des actions du stagiaire</h3>
-                                    <div class="ssi-screen max-h-96 overflow-y-auto overflow-x-hidden" style="word-break: break-word; max-width: 100%;">
+                                    <div class="ssi-screen flex-1 overflow-y-auto overflow-x-hidden" style="word-break: break-word; max-width: 100%;">
                                 ${STATE.actionLog.length === 0 ?
                                     '<div class="text-center opacity-50">Aucune action enregistrée</div>' :
                                     STATE.actionLog.slice(-20).reverse().map(log => `
