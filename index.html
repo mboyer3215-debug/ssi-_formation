@@ -396,16 +396,16 @@
                 return;
             }
 
-            // Générer le numéro de session au format AAMMJJHHMMSS (date/heure)
+            // Générer le numéro de session au format AAAAMMJJHHMMSS (date/heure)
             const now = new Date();
-            const year = String(now.getFullYear()).slice(-2); // 2025 → 25
+            const year = now.getFullYear();
             const month = String(now.getMonth() + 1).padStart(2, '0');
             const day = String(now.getDate()).padStart(2, '0');
             const hours = String(now.getHours()).padStart(2, '0');
             const minutes = String(now.getMinutes()).padStart(2, '0');
             const seconds = String(now.getSeconds()).padStart(2, '0');
 
-            const sessionNumber = `${year}${month}${day}${hours}${minutes}${seconds}`; // Ex: 251204230745
+            const sessionNumber = `${year}${month}${day}${hours}${minutes}${seconds}`; // Ex: 20251204230745
 
             const sessionId = Date.now().toString();
             const sessionData = {
@@ -2709,12 +2709,20 @@
                             <!-- Colonne droite : Vidéo et Journal -->
                             <div class="space-y-6">
                                 <!-- Video Panel Superviseur -->
-                                ${STATE.sessionActive ? `
                                 <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
                                     <h3 class="text-2xl font-bold mb-4">📹 Vue Stagiaire</h3>
 
                                     <div id="video-status-section">
-                                        ${!STATE.remoteStream ? `
+                                        ${!STATE.sessionActive ? `
+                                            <div class="text-center py-8">
+                                                <p class="text-gray-600 dark:text-gray-400 mb-4">
+                                                    Aucune session active
+                                                </p>
+                                                <p class="text-xs text-gray-500">
+                                                    Démarrez une session pour voir la vidéo du stagiaire
+                                                </p>
+                                            </div>
+                                        ` : !STATE.remoteStream ? `
                                             <div class="text-center py-8">
                                                 <p class="text-gray-600 dark:text-gray-400 mb-4">
                                                     En attente que le stagiaire active sa caméra...
@@ -2797,7 +2805,6 @@
                                         `}
                                     </div>
                                 </div>
-                                ` : ''}
 
                                 <!-- Action Log -->
                                 <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
