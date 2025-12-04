@@ -265,7 +265,6 @@
             actionLog: [],
             sessionLogs: [], // Historique de tous les journaux de session
             sessionYear: new Date().getFullYear(), // Année en cours
-            sessionCounter: 0, // Compteur annuel de sessions (remis à 0 chaque année)
             searchQuery: '', // Recherche dans les journaux
 
             // Système de mise hors service
@@ -395,72 +394,49 @@
                 return;
             }
 
-            // Charger le compteur depuis Firebase avant de créer la session
-            db.ref('session_counter').once('value', (counterSnapshot) => {
-                const counterData = counterSnapshot.val();
-                const currentYear = new Date().getFullYear();
+            // Générer le numéro de session au format AANNN basé sur l'horodatage
+            const now = new Date();
+            const currentYear = now.getFullYear();
+            const yearSuffix = currentYear % 100; // 2025 → 25, 2026 → 26
 
-                if (counterData) {
-                    // Si on a des données sauvegardées
-                    if (counterData.year === currentYear) {
-                        // Même année, continuer le compteur
-                        STATE.sessionYear = counterData.year;
-                        STATE.sessionCounter = counterData.counter;
-                    } else {
-                        // Nouvelle année, réinitialiser
-                        STATE.sessionYear = currentYear;
-                        STATE.sessionCounter = 0;
-                    }
-                } else {
-                    // Première session jamais créée, initialiser
-                    STATE.sessionYear = currentYear;
-                    STATE.sessionCounter = 0;
-                }
+            // Utiliser l'horodatage pour générer un numéro unique
+            // Format: AAMMDDHHMMSS (ex: 251204153045 pour le 4 déc 2025 à 15h30:45)
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            const sessionNumber = `${yearSuffix}${month}${day}${hours}${minutes}${seconds}`;
 
-                // Incrémenter le compteur
-                STATE.sessionCounter++;
+            const sessionId = Date.now().toString();
+            const sessionData = {
+                id: sessionId,
+                sessionNumber: sessionNumber,
+                sessionYear: currentYear,
+                startTime: firebase.database.ServerValue.TIMESTAMP,
+                endTime: null,
+                active: true,
+                supervisor: STATE.currentUser || 'Superviseur',
+                trainees: {}
+            };
 
-                // Sauvegarder le nouveau compteur dans Firebase
-                db.ref('session_counter').set({
-                    year: STATE.sessionYear,
-                    counter: STATE.sessionCounter
-                });
+            db.ref(`active_session`).set(sessionId);
+            db.ref(`sessions/${sessionId}`).set(sessionData);
 
-                // Générer le numéro de session au format AANNN
-                const yearSuffix = STATE.sessionYear % 100; // 2025 → 25, 2026 → 26
-                const sessionNumber = `${yearSuffix}${String(STATE.sessionCounter).padStart(3, '0')}`; // Ex: 25001
+            STATE.sessionActive = true;
+            STATE.sessionId = sessionId;
+            STATE.currentSessionNumber = sessionNumber; // Stocker pour endSession
+            STATE.actionLog = []; // Réinitialiser le journal pour la nouvelle session
 
-                const sessionId = Date.now().toString();
-                const sessionData = {
-                    id: sessionId,
-                    sessionNumber: sessionNumber,
-                    sessionYear: STATE.sessionYear,
-                    sessionCounter: STATE.sessionCounter,
-                    startTime: firebase.database.ServerValue.TIMESTAMP,
-                    endTime: null,
-                    active: true,
-                    supervisor: STATE.currentUser || 'Superviseur',
-                    trainees: {}
-                };
+            listenToSession(sessionId);
+            render();
 
-                db.ref(`active_session`).set(sessionId);
-                db.ref(`sessions/${sessionId}`).set(sessionData);
+            // Attendre un peu que le stagiaire se connecte et démarre sa caméra, puis se connecter
+            setTimeout(() => {
+                supervisorConnectToVideo();
+            }, 2000);
 
-                STATE.sessionActive = true;
-                STATE.sessionId = sessionId;
-                STATE.currentSessionNumber = sessionNumber; // Stocker pour endSession
-                STATE.actionLog = []; // Réinitialiser le journal pour la nouvelle session
-
-                listenToSession(sessionId);
-                render();
-
-                // Attendre un peu que le stagiaire se connecte et démarre sa caméra, puis se connecter
-                setTimeout(() => {
-                    supervisorConnectToVideo();
-                }, 2000);
-
-                showCustomAlert(`Session ${sessionNumber} démarrée avec succès !`);
-            });
+            showCustomAlert(`Session ${sessionNumber} démarrée avec succès !`);
         }
 
         function endSession() {
@@ -470,28 +446,59 @@
                 const sessionNumber = STATE.currentSessionNumber;
                 const sessionId = STATE.sessionId;
 
-                // Sauvegarder une dernière fois le journal avant de terminer
-                saveSessionLogToFirebase();
+                // Récupérer les infos des stagiaires depuis Firebase
+                db.ref(`sessions/${sessionId}/trainees`).once('value', (traineesSnapshot) => {
+                    const traineesData = traineesSnapshot.val();
+                    let traineeName = 'Inconnu';
 
-                // Marquer la session comme terminée dans Firebase
-                db.ref(`sessions/${sessionId}`).update({
-                    endTime: firebase.database.ServerValue.TIMESTAMP,
-                    active: false
+                    // Récupérer le premier stagiaire enregistré
+                    if (traineesData) {
+                        const traineeIds = Object.keys(traineesData);
+                        if (traineeIds.length > 0) {
+                            const firstTrainee = traineesData[traineeIds[0]];
+                            traineeName = `${firstTrainee.prenom || ''} ${firstTrainee.nom || ''}`.trim();
+                        }
+                    }
+
+                    // Sauvegarder le journal de session avant de terminer
+                    if (STATE.actionLog.length > 0) {
+                        const sessionLog = {
+                            sessionId: sessionId,
+                            sessionNumber: sessionNumber,
+                            sessionYear: STATE.sessionYear,
+                            startTime: new Date().toISOString(),
+                            endTime: new Date().toISOString(),
+                            supervisor: STATE.currentUser || 'Superviseur',
+                            trainee: traineeName,
+                            actions: [...STATE.actionLog] // Copie du journal
+                        };
+
+                        // Ajouter à l'historique local
+                        STATE.sessionLogs.push(sessionLog);
+
+                        // Sauvegarder dans Firebase
+                        db.ref(`session_logs/${sessionId}`).set(sessionLog);
+                    }
+
+                    db.ref(`sessions/${sessionId}`).update({
+                        endTime: firebase.database.ServerValue.TIMESTAMP,
+                        active: false
+                    });
+
+                    db.ref(`active_session`).remove();
+
+                    STATE.sessionActive = false;
+                    STATE.sessionId = null;
+                    STATE.currentSessionNumber = null;
+                    STATE.actionLog = []; // Effacer le journal actuel
+
+                    // Remettre SDI et SMSI en veille automatiquement
+                    resetSdiToIdle();
+                    resetSmsiToIdle();
+
+                    render();
+                    showCustomAlert(`Session ${sessionNumber} terminée. Journal sauvegardé.`);
                 });
-
-                db.ref(`active_session`).remove();
-
-                STATE.sessionActive = false;
-                STATE.sessionId = null;
-                STATE.currentSessionNumber = null;
-                STATE.actionLog = []; // Effacer le journal actuel
-
-                // Remettre SDI et SMSI en veille automatiquement
-                resetSdiToIdle();
-                resetSmsiToIdle();
-
-                render();
-                showCustomAlert(`Session ${sessionNumber} terminée. Journal sauvegardé.`);
             });
         }
 
@@ -882,44 +889,6 @@
             if (STATE.userType === 'trainee') {
                 sendMessage('ACTION_LOG', log);
             }
-
-            // Sauvegarder automatiquement le journal en temps réel dans Firebase
-            if (STATE.sessionActive && STATE.sessionId && firebaseInitialized) {
-                saveSessionLogToFirebase();
-            }
-        }
-
-        function saveSessionLogToFirebase() {
-            if (!STATE.sessionActive || !STATE.sessionId || STATE.actionLog.length === 0) return;
-
-            // Récupérer les infos du stagiaire depuis Firebase
-            db.ref(`sessions/${STATE.sessionId}/trainees`).once('value', (traineesSnapshot) => {
-                const traineesData = traineesSnapshot.val();
-                let traineeName = 'Inconnu';
-
-                if (traineesData) {
-                    const traineeIds = Object.keys(traineesData);
-                    if (traineeIds.length > 0) {
-                        const firstTrainee = traineesData[traineeIds[0]];
-                        traineeName = `${firstTrainee.prenom || ''} ${firstTrainee.nom || ''}`.trim();
-                    }
-                }
-
-                const sessionLog = {
-                    sessionId: STATE.sessionId,
-                    sessionNumber: STATE.currentSessionNumber,
-                    sessionYear: STATE.sessionYear,
-                    sessionCounter: STATE.sessionCounter,
-                    startTime: new Date().toISOString(),
-                    endTime: new Date().toISOString(),
-                    supervisor: STATE.currentUser || 'Superviseur',
-                    trainee: traineeName,
-                    actions: [...STATE.actionLog]
-                };
-
-                // Sauvegarder dans Firebase (écrase le log existant avec les nouvelles actions)
-                db.ref(`session_logs/${STATE.sessionId}`).set(sessionLog);
-            });
         }
 
         function addSmsiMessage(message) {
@@ -2028,24 +1997,18 @@
         function loadSessionLogsFromFirebase() {
             if (!firebaseInitialized) return;
 
+            // Charger les journaux de session avec gestion d'erreur
             db.ref('session_logs').once('value', (snapshot) => {
                 const logs = snapshot.val();
                 if (logs) {
                     STATE.sessionLogs = Object.values(logs);
-
-                    // Trouver le compteur le plus élevé pour l'année en cours
-                    const currentYear = new Date().getFullYear();
-                    const currentYearLogs = STATE.sessionLogs.filter(log => log.sessionYear === currentYear);
-
-                    if (currentYearLogs.length > 0) {
-                        const maxCounter = Math.max(...currentYearLogs.map(log => log.sessionCounter || 0));
-                        STATE.sessionCounter = maxCounter;
-                        STATE.sessionYear = currentYear;
-                    }
                 }
+            }).catch((error) => {
+                console.warn('Impossible de charger les journaux de session:', error);
+                // Continue sans les journaux - pas bloquant
             });
 
-            // Listen for new logs
+            // Écouter les nouveaux journaux avec gestion d'erreur
             db.ref('session_logs').on('child_added', (snapshot) => {
                 const log = snapshot.val();
                 if (log && !STATE.sessionLogs.find(l => l.sessionId === log.sessionId)) {
@@ -2054,6 +2017,8 @@
                         render();
                     }
                 }
+            }, (error) => {
+                console.warn('Erreur lors de l\'écoute des journaux:', error);
             });
         }
 
