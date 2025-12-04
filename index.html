@@ -265,6 +265,7 @@
             actionLog: [],
             sessionLogs: [], // Historique de tous les journaux de session
             sessionYear: new Date().getFullYear(), // Année en cours
+            sessionCounter: 0, // Compteur annuel de sessions (remis à 0 chaque année)
             searchQuery: '', // Recherche dans les journaux
 
             // Système de mise hors service
@@ -394,25 +395,25 @@
                 return;
             }
 
-            // Générer le numéro de session au format AANNN basé sur l'horodatage
-            const now = new Date();
-            const currentYear = now.getFullYear();
+            // Générer le numéro de session au format AANNN
+            const currentYear = new Date().getFullYear();
             const yearSuffix = currentYear % 100; // 2025 → 25, 2026 → 26
 
-            // Utiliser l'horodatage pour générer un numéro unique
-            // Format: AAMMDDHHMMSS (ex: 251204153045 pour le 4 déc 2025 à 15h30:45)
-            const month = String(now.getMonth() + 1).padStart(2, '0');
-            const day = String(now.getDate()).padStart(2, '0');
-            const hours = String(now.getHours()).padStart(2, '0');
-            const minutes = String(now.getMinutes()).padStart(2, '0');
-            const seconds = String(now.getSeconds()).padStart(2, '0');
-            const sessionNumber = `${yearSuffix}${month}${day}${hours}${minutes}${seconds}`;
+            // Si on change d'année, réinitialiser le compteur
+            if (currentYear !== STATE.sessionYear) {
+                STATE.sessionYear = currentYear;
+                STATE.sessionCounter = 0;
+            }
+
+            STATE.sessionCounter++; // Incrémenter le compteur annuel
+            const sessionNumber = `${yearSuffix}${String(STATE.sessionCounter).padStart(3, '0')}`; // Ex: 25001
 
             const sessionId = Date.now().toString();
             const sessionData = {
                 id: sessionId,
                 sessionNumber: sessionNumber,
                 sessionYear: currentYear,
+                sessionCounter: STATE.sessionCounter,
                 startTime: firebase.database.ServerValue.TIMESTAMP,
                 endTime: null,
                 active: true,
@@ -466,6 +467,7 @@
                             sessionId: sessionId,
                             sessionNumber: sessionNumber,
                             sessionYear: STATE.sessionYear,
+                            sessionCounter: STATE.sessionCounter,
                             startTime: new Date().toISOString(),
                             endTime: new Date().toISOString(),
                             supervisor: STATE.currentUser || 'Superviseur',
@@ -852,6 +854,52 @@
                 }
             }
             render();
+        }
+
+        async function toggleSupervisorMic() {
+            if (!STATE.audioEnabled) {
+                // Activer le micro
+                try {
+                    // Demander accès au micro uniquement (pas de vidéo)
+                    STATE.localStream = await navigator.mediaDevices.getUserMedia({
+                        video: false,
+                        audio: true
+                    });
+
+                    STATE.audioEnabled = true;
+
+                    // Ajouter le flux audio à la connexion WebRTC existante
+                    if (STATE.peerConnection) {
+                        STATE.localStream.getAudioTracks().forEach(track => {
+                            STATE.peerConnection.addTrack(track, STATE.localStream);
+                        });
+                    }
+
+                    render();
+                    showCustomAlert('Micro activé - Le stagiaire peut vous entendre');
+                } catch (error) {
+                    console.error('Erreur accès micro:', error);
+                    showCustomAlert('Impossible d\'accéder au micro. Vérifiez les permissions.');
+                }
+            } else {
+                // Couper le micro
+                if (STATE.localStream) {
+                    STATE.localStream.getAudioTracks().forEach(track => {
+                        track.stop();
+                        if (STATE.peerConnection) {
+                            STATE.peerConnection.getSenders().forEach(sender => {
+                                if (sender.track === track) {
+                                    STATE.peerConnection.removeTrack(sender);
+                                }
+                            });
+                        }
+                    });
+                    STATE.localStream = null;
+                }
+
+                STATE.audioEnabled = false;
+                render();
+            }
         }
 
         // Fonction pour ajuster le volume audio
@@ -1997,18 +2045,24 @@
         function loadSessionLogsFromFirebase() {
             if (!firebaseInitialized) return;
 
-            // Charger les journaux de session avec gestion d'erreur
             db.ref('session_logs').once('value', (snapshot) => {
                 const logs = snapshot.val();
                 if (logs) {
                     STATE.sessionLogs = Object.values(logs);
+
+                    // Trouver le compteur le plus élevé pour l'année en cours
+                    const currentYear = new Date().getFullYear();
+                    const currentYearLogs = STATE.sessionLogs.filter(log => log.sessionYear === currentYear);
+
+                    if (currentYearLogs.length > 0) {
+                        const maxCounter = Math.max(...currentYearLogs.map(log => log.sessionCounter || 0));
+                        STATE.sessionCounter = maxCounter;
+                        STATE.sessionYear = currentYear;
+                    }
                 }
-            }).catch((error) => {
-                console.warn('Impossible de charger les journaux de session:', error);
-                // Continue sans les journaux - pas bloquant
             });
 
-            // Écouter les nouveaux journaux avec gestion d'erreur
+            // Listen for new logs
             db.ref('session_logs').on('child_added', (snapshot) => {
                 const log = snapshot.val();
                 if (log && !STATE.sessionLogs.find(l => l.sessionId === log.sessionId)) {
@@ -2017,8 +2071,6 @@
                         render();
                     }
                 }
-            }, (error) => {
-                console.warn('Erreur lors de l\'écoute des journaux:', error);
             });
         }
 
@@ -2782,6 +2834,23 @@
                                                     </p>
                                                 </div>
                                                 ` : ''}
+
+                                                <!-- Bouton Micro Superviseur -->
+                                                <div class="bg-${STATE.audioEnabled ? 'green' : 'gray'}-50 dark:bg-${STATE.audioEnabled ? 'green' : 'gray'}-900 p-4 rounded-lg border-2 border-${STATE.audioEnabled ? 'green' : 'gray'}-500">
+                                                    <button
+                                                        onclick="toggleSupervisorMic()"
+                                                        class="w-full px-6 py-3 bg-${STATE.audioEnabled ? 'green' : 'gray'}-500 text-white rounded-lg hover:bg-${STATE.audioEnabled ? 'green' : 'gray'}-600 transition font-bold text-lg flex items-center justify-center gap-3"
+                                                    >
+                                                        <span class="text-2xl">${STATE.audioEnabled ? '🎤' : '🎤'}</span>
+                                                        <span>${STATE.audioEnabled ? 'MICRO ACTIVÉ - Cliquez pour couper' : 'MICRO COUPÉ - Cliquez pour parler au stagiaire'}</span>
+                                                    </button>
+                                                    <p class="text-xs text-gray-600 dark:text-gray-400 mt-2 text-center">
+                                                        ${STATE.audioEnabled ?
+                                                            '✅ Le stagiaire peut vous entendre. Parlez normalement.' :
+                                                            '🔇 Votre micro est coupé. Le stagiaire ne vous entend pas.'
+                                                        }
+                                                    </p>
+                                                </div>
 
                                                 <!-- Contrôles d'enregistrement -->
                                                 <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
