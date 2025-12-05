@@ -2517,9 +2517,9 @@
                         <!-- Grille 2 colonnes : SDI/SMSI à gauche, Vidéo/Journal à droite -->
                         <div class="grid lg:grid-cols-2 gap-6">
                             <!-- Colonne gauche : SDI et SMSI -->
-                            <div class="flex flex-col gap-6">
+                            <div class="space-y-6">
                                 <!-- SDI Controls -->
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg" style="height: 600px; overflow-y: auto;">
                                     <h3 class="text-2xl font-bold mb-4 text-primary">🔥 Contrôle SDI</h3>
 
                                 <div class="space-y-4">
@@ -2612,7 +2612,7 @@
                                 </div>
 
                                 <!-- SMSI Controls -->
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg flex-1">
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg" style="height: 500px; overflow-y: auto;">
                                     <h3 class="text-2xl font-bold mb-4 text-primary">🛡️ Contrôle SMSI</h3>
 
                                     <div class="space-y-4">
@@ -2707,10 +2707,10 @@
                             </div>
 
                             <!-- Colonne droite : Vidéo et Journal -->
-                            <div class="flex flex-col gap-6">
+                            <div class="space-y-6">
                                 <!-- Video Panel Superviseur -->
                                 ${STATE.sessionActive ? `
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg">
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg" style="height: 600px; overflow-y: auto;">
                                     <h3 class="text-2xl font-bold mb-4">📹 Vue Stagiaire</h3>
 
                                     <div id="video-status-section">
@@ -2724,9 +2724,9 @@
                                                 </button>
                                             </div>
                                         ` : `
-                                            <div class="flex flex-col gap-3 h-full">
+                                            <div class="space-y-3">
                                                 <!-- Vidéo -->
-                                                <div class="relative bg-black rounded-lg overflow-hidden flex-1" style="min-height: 400px;">
+                                                <div class="relative bg-black rounded-lg overflow-hidden" style="height: 280px;">
                                                     <video id="trainee-video" autoplay playsinline class="w-full h-full object-cover"></video>
                                                     <div class="absolute top-2 left-2 px-2 py-1 bg-red-500 text-white text-xs rounded">
                                                         🔴 STAGIAIRE EN DIRECT
@@ -2800,9 +2800,9 @@
                                 ` : ''}
 
                                 <!-- Action Log -->
-                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg flex-1 flex flex-col">
+                                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg" style="height: 500px; overflow-y: auto;">
                                     <h3 class="text-2xl font-bold mb-4 text-primary">📋 Journal des actions du stagiaire</h3>
-                                    <div class="ssi-screen flex-1 overflow-y-auto overflow-x-hidden" style="word-break: break-word; max-width: 100%;">
+                                    <div class="ssi-screen max-h-96 overflow-y-auto overflow-x-hidden" style="word-break: break-word; max-width: 100%;">
                                 ${STATE.actionLog.length === 0 ?
                                     '<div class="text-center opacity-50">Aucune action enregistrée</div>' :
                                     STATE.actionLog.slice(-20).reverse().map(log => `
