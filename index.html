@@ -45,7 +45,7 @@ uga:{alarmType:'generale',temporization:0,temporizationActive:false,temporizatio
 actionLog:[],sessionLogs:[],searchQuery:'',outOfService:[],keypadInput:'',workflowStep:null,workflowData:{},
 videoEnabled:false,audioEnabled:false,localStream:null,remoteStream:null,peerConnection:null,
 mediaRecorder:null,recordedChunks:[],isRecording:false,recordingStartTime:null,
-videoStorageHandle:null,storageDirName:'',sessionVideos:{},
+videoStorageHandle:null,storageDirName:'',sessionVideos:{},currentRecordingFilename:null,
 audioVolume:0.5,audioMuted:true,supervisorMicActive:false,
 // FIX: Store session start time
 sessionStartTime:null,
@@ -192,6 +192,8 @@ showCustomAlert(`Session ${sessionNumber} démarrée avec succès!`);
 function endSession(){
 if(!STATE.sessionActive||!STATE.sessionId)return;
 showCustomConfirm('Êtes-vous sûr de vouloir terminer la session?',()=>{
+// Auto-stop recording if still running
+if(STATE.isRecording){stopRecording();}
 const sessionNumber=STATE.currentSessionNumber;
 const sessionId=STATE.sessionId;
 const endTimeISO=new Date().toISOString();
@@ -219,7 +221,7 @@ endTime:endTimeISO,
 supervisor:STATE.currentUser||'Superviseur',
 trainee:traineeName,
 actions:[...STATE.actionLog],
-videoFilename:videoInfo?videoInfo.filename:null
+videoFilename:videoInfo?videoInfo.filename:(STATE.currentRecordingFilename||null)
 };
 STATE.sessionLogs.push(sessionLog);
 db.ref(`session_logs/${sessionId}`).set(sessionLog);
@@ -391,13 +393,9 @@ STATE.mediaRecorder=new MediaRecorder(STATE.remoteStream,{mimeType:'video/webm;c
 STATE.mediaRecorder.ondataavailable=(event)=>{if(event.data&&event.data.size>0){STATE.recordedChunks.push(event.data);}};
 STATE.mediaRecorder.onstop=async()=>{
 const blob=new Blob(STATE.recordedChunks,{type:'video/webm'});
-const sessionNumber=STATE.currentSessionNumber||'session';
-const timestamp=new Date().toISOString().replace(/[:.]/g,'-');
-const filename=`debriefing_${sessionNumber}_${timestamp}.webm`;
-// Keep blob for debriefing playback during this browser session
+const filename=STATE.currentRecordingFilename||`debriefing_${Date.now()}.webm`;
 const blobUrl=URL.createObjectURL(blob);
-if(STATE.sessionId){STATE.sessionVideos[STATE.sessionId]={blob,blobUrl,filename,date:new Date().toISOString()};}
-// Save to chosen directory or download
+if(STATE.sessionId){STATE.sessionVideos[STATE.sessionId]={blob,blobUrl,filename,date:new Date().toISOString()};}// Save to chosen directory or download
 let saved=false;
 if(STATE.videoStorageHandle){
 try{
@@ -418,6 +416,10 @@ render();
 };
 STATE.mediaRecorder.start(1000);
 STATE.isRecording=true;STATE.recordingStartTime=Date.now();
+// Pre-generate filename so endSession can reference it even if onstop hasn't fired yet
+const preSessionNum=STATE.currentSessionNumber||'session';
+const preTimestamp=new Date().toISOString().replace(/[:.]/g,'-');
+STATE.currentRecordingFilename=`debriefing_${preSessionNum}_${preTimestamp}.webm`;
 STATE.recordingInterval=setInterval(()=>{if(STATE.isRecording){const el=document.getElementById('rec-timer');if(el)el.textContent=getRecordingDuration();}},1000);
 render();showCustomAlert('📹 Enregistrement démarré');
 }catch(error){console.error('Erreur enregistrement:',error);showCustomAlert('Erreur lors du démarrage de l\'enregistrement');}
